@@ -69,6 +69,7 @@ static void spinup(wd1770_t *fdc)
     fdc->status |= WD1770_STATUS_MOTOR_ON;
 }
 
+static void spindown(wd1770_t *fdc) __attribute__((unused));
 static void spindown(wd1770_t *fdc)
 {
     fdc->motor_on = false;

@@ -370,7 +370,11 @@ static void reg_write(m6522_t *via, uint8_t addr, uint8_t data)
         case M6522_REG_T1CH:
             via->t1.latch   = (via->t1.latch & 0x00FF) | ((uint16_t)data << 8);
             via->t1.counter = via->t1.latch;
-            via->t1.t_bit   = false;
+            /* In PB7 mode t_bit drives PB7 output and must NOT be reset on
+             * re-arm — PB7 only changes on underflow.  Outside PB7 mode the
+             * bit is an internal one-shot guard; reset it so one-shot fires. */
+            if (!(via->acr & M6522_ACR_T1_PB7))
+                via->t1.t_bit = false;
             clear_ifr(via, M6522_IRQ_T1);
             PIP_RESET(via->t1.pip, PIP_COUNT_OFFSET);
             PIP_SET(via->t1.pip, PIP_COUNT_OFFSET, 2);
