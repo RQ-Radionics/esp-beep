@@ -42,7 +42,7 @@ BBCCPU *bbc_cpu_create(BBCMemoryRead readCallback, BBCMemoryWrite writeCallback,
     return bbc;
 }
 
-void bbc_cpu_destroy(BBBCPU *cpu) {
+void bbc_cpu_destroy(BBCCPU *cpu) {
     if (cpu) {
         if (cpu->cpu) {
             vrEmu6502Destroy(cpu->cpu);
@@ -51,73 +51,73 @@ void bbc_cpu_destroy(BBBCPU *cpu) {
     }
 }
 
-void bbc_cpu_reset(BBBCPU *cpu) {
+void bbc_cpu_reset(BBCCPU *cpu) {
     if (cpu && cpu->cpu) {
         vrEmu6502Reset(cpu->cpu);
     }
 }
 
-int bbc_cpu_step(BBBCPU *cpu) {
+int bbc_cpu_step(BBCCPU *cpu) {
     if (cpu && cpu->cpu) {
         return vrEmu6502Step(cpu->cpu);
     }
     return 0;
 }
 
-void bbc_cpu_nmi(BBBCPU *cpu) {
+void bbc_cpu_nmi(BBCCPU *cpu) {
     if (cpu && cpu->cpu) {
         vrEmu6502NMI(cpu->cpu);
     }
 }
 
-void bbc_cpu_irq(BBBCPU *cpu) {
+void bbc_cpu_irq(BBCCPU *cpu) {
     if (cpu && cpu->cpu) {
         vrEmu6502Interrupt(cpu->cpu);
     }
 }
 
-void bbc_cpu_clear_irq(BBBCPU *cpu) {
+void bbc_cpu_clear_irq(BBCCPU *cpu) {
     if (cpu && cpu->cpu) {
         vrEmu6502ClearInterrupt(cpu->cpu);
     }
 }
 
-uint8_t bbc_cpu_get_a(BBBCPU *cpu) {
+uint8_t bbc_cpu_get_a(BBCCPU *cpu) {
     if (cpu && cpu->cpu) {
         return vrEmu6502GetRegA(cpu->cpu);
     }
     return 0;
 }
 
-uint8_t bbc_cpu_get_x(BBBCPU *cpu) {
+uint8_t bbc_cpu_get_x(BBCCPU *cpu) {
     if (cpu && cpu->cpu) {
         return vrEmu6502GetRegX(cpu->cpu);
     }
     return 0;
 }
 
-uint8_t bbc_cpu_get_y(BBBCPU *cpu) {
+uint8_t bbc_cpu_get_y(BBCCPU *cpu) {
     if (cpu && cpu->cpu) {
         return vrEmu6502GetRegY(cpu->cpu);
     }
     return 0;
 }
 
-uint8_t bbc_cpu_get_p(BBBCPU *cpu) {
+uint8_t bbc_cpu_get_p(BBCCPU *cpu) {
     if (cpu && cpu->cpu) {
         return vrEmu6502GetStatus(cpu->cpu);
     }
     return 0;
 }
 
-uint8_t bbc_cpu_get_sp(BBBCPU *cpu) {
+uint8_t bbc_cpu_get_sp(BBCCPU *cpu) {
     if (cpu && cpu->cpu) {
         return vrEmu6502GetRegS(cpu->cpu);
     }
     return 0;
 }
 
-uint16_t bbc_cpu_get_pc(BBBCPU *cpu) {
+uint16_t bbc_cpu_get_pc(BBCCPU *cpu) {
     if (cpu && cpu->cpu) {
         return vrEmu6502GetPC(cpu->cpu);
     }

@@ -5,6 +5,7 @@ set(EXTRA_COMPONENT_DIRS
     components/bbc_cpu
     components/bbc_memory
     components/bbc_video
+    components/bbc_machine
     components/fabgl
     components/wd1770
     components/m6522
