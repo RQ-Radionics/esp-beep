@@ -145,16 +145,17 @@ uint8_t sn76489_get_volume(const sn76489_t *psg, uint8_t channel);
 uint16_t sn76489_get_tone(const sn76489_t *psg, uint8_t channel);
 
 /* --------------------------------------------------------------------------
- * I2S audio bridge (ESP32 only — sn76489_audio.c)
+ * DAC audio bridge (ESP32 only — sn76489_audio.c)
+ * Uses the ESP32 internal DAC on GPIO 25 (DAC channel 1, 3.5mm jack).
  * -------------------------------------------------------------------------- */
 #ifdef ESP_PLATFORM
 #include "esp_err.h"
 
 /*
- * Initialise the I2S peripheral for audio output.
+ * Initialise the internal DAC for audio output.
  * Must be called after sn76489_init().
- * Pin assignments and sample rate are compile-time constants (see
- * sn76489_audio.c); override with -D flags or Kconfig if needed.
+ * Sample rate is a compile-time constant (see sn76489_audio.c);
+ * override with -DSTN76489_AUDIO_SAMPLE_RATE=<hz> if needed.
  */
 esp_err_t sn76489_audio_init(void);
 

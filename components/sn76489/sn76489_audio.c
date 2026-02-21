@@ -1,14 +1,18 @@
 /*
- * sn76489_audio.c — I2S audio bridge for SN76489 PSG on ESP32
+ * sn76489_audio.c — DAC audio bridge for SN76489 PSG on ESP32
  *
- * Drives an I2S DAC (or the internal DAC via I2S0) with PCM samples
- * rendered by sn76489_render().  Uses the ESP-IDF v5.x I2S driver
- * (i2s_std API).
+ * Uses the ESP32 internal DAC on GPIO 25 (DAC channel 1) via the
+ * esp_driver_dac continuous-mode API (ESP-IDF v5.x).
+ *
+ * The BBC SN76489 produces 16-bit signed mono PCM.  We scale each sample
+ * to the DAC's 8-bit unsigned range [0, 255] with a DC offset of 128.
+ *
+ * GPIO 25 is connected directly to the 3.5 mm audio jack on the Olimex
+ * ESP32-SBC-FabGL board (same as TTGO VGA32).  No external BCK/WS needed.
  *
  * Usage:
  *   1. Call sn76489_audio_init() once after sn76489_init().
- *   2. Call sn76489_audio_task() from a FreeRTOS task (loops forever,
- *      fills a DMA buffer, calls sn76489_write() for pending bytes).
+ *   2. Call sn76489_audio_push(&psg) from a FreeRTOS task (loops forever).
  *   3. Call sn76489_audio_deinit() on shutdown.
  *
  * Licence: GPL-2.0
@@ -19,151 +23,116 @@
 
 #include <string.h>
 #include "freertos/FreeRTOS.h"
-#include "freertos/task.h"
-#include "driver/i2s_std.h"
 #include "esp_log.h"
+#include "driver/dac_continuous.h"
 #include "sn76489.h"
 
 static const char *TAG = "sn76489_audio";
 
 /* --------------------------------------------------------------------------
- * Configuration — override in sdkconfig / Kconfig if needed
+ * Configuration
  * -------------------------------------------------------------------------- */
 #ifndef SN76489_AUDIO_SAMPLE_RATE
 #  define SN76489_AUDIO_SAMPLE_RATE   22050
 #endif
 
-#ifndef SN76489_AUDIO_DMA_BUF_COUNT
-#  define SN76489_AUDIO_DMA_BUF_COUNT  4
-#endif
-
-#ifndef SN76489_AUDIO_DMA_BUF_LEN
-#  define SN76489_AUDIO_DMA_BUF_LEN    512   /* samples per DMA buffer    */
-#endif
-
-/* I2S pin defaults — override in your board header */
-#ifndef SN76489_I2S_BCK_PIN
-#  define SN76489_I2S_BCK_PIN     26
-#endif
-#ifndef SN76489_I2S_WS_PIN
-#  define SN76489_I2S_WS_PIN      25
-#endif
-#ifndef SN76489_I2S_DATA_PIN
-#  define SN76489_I2S_DATA_PIN    22
-#endif
-#ifndef SN76489_I2S_PORT
-#  define SN76489_I2S_PORT        I2S_NUM_0
+/*
+ * DMA buffer length in samples.
+ * dac_continuous_write_cyclically() copies data into its internal ring
+ * buffer; we keep this small to minimise latency.
+ */
+#ifndef SN76489_AUDIO_BUF_SAMPLES
+#  define SN76489_AUDIO_BUF_SAMPLES   512
 #endif
 
 /* --------------------------------------------------------------------------
  * Module state
  * -------------------------------------------------------------------------- */
-static i2s_chan_handle_t s_i2s_tx_chan = NULL;
+static dac_continuous_handle_t s_dac_handle = NULL;
 
-/* DMA transmit buffer: stereo 16-bit (L=R=mono sample) */
-static int16_t s_dma_buf[SN76489_AUDIO_DMA_BUF_LEN * 2];
+/* Intermediate 8-bit unsigned PCM buffer */
+static uint8_t s_dac_buf[SN76489_AUDIO_BUF_SAMPLES];
 
 /* --------------------------------------------------------------------------
- * Public: initialise I2S peripheral
+ * Public: initialise DAC peripheral
  * -------------------------------------------------------------------------- */
 esp_err_t sn76489_audio_init(void)
 {
-    i2s_chan_config_t chan_cfg = I2S_CHANNEL_DEFAULT_CONFIG(
-        SN76489_I2S_PORT, I2S_ROLE_MASTER);
-    chan_cfg.dma_desc_num  = SN76489_AUDIO_DMA_BUF_COUNT;
-    chan_cfg.dma_frame_num = SN76489_AUDIO_DMA_BUF_LEN;
-
-    esp_err_t err = i2s_new_channel(&chan_cfg, &s_i2s_tx_chan, NULL);
-    if (err != ESP_OK) {
-        ESP_LOGE(TAG, "i2s_new_channel failed: %s", esp_err_to_name(err));
-        return err;
-    }
-
-    i2s_std_config_t std_cfg = {
-        .clk_cfg  = I2S_STD_CLK_DEFAULT_CONFIG(SN76489_AUDIO_SAMPLE_RATE),
-        .slot_cfg = I2S_STD_MSB_SLOT_DEFAULT_CONFIG(
-                        I2S_DATA_BIT_WIDTH_16BIT, I2S_SLOT_MODE_STEREO),
-        .gpio_cfg = {
-            .bclk = SN76489_I2S_BCK_PIN,
-            .ws   = SN76489_I2S_WS_PIN,
-            .dout = SN76489_I2S_DATA_PIN,
-            .din  = I2S_GPIO_UNUSED,
-            .invert_flags = {
-                .mclk_inv = false,
-                .bclk_inv = false,
-                .ws_inv   = false,
-            },
-        },
+    dac_continuous_config_t cfg = {
+        .chan_mask   = DAC_CHANNEL_MASK_CH0,   /* GPIO 25 = DAC1 = channel 0 */
+        .desc_num    = 4,                       /* number of DMA descriptors  */
+        .buf_size    = SN76489_AUDIO_BUF_SAMPLES * 4, /* internal ring buf    */
+        .freq_hz     = SN76489_AUDIO_SAMPLE_RATE,
+        .offset      = 0,
+        .clk_src     = DAC_DIGI_CLK_SRC_DEFAULT,
+        .chan_mode    = DAC_CHANNEL_MODE_SIMUL,
     };
 
-    err = i2s_channel_init_std_mode(s_i2s_tx_chan, &std_cfg);
+    esp_err_t err = dac_continuous_new_channels(&cfg, &s_dac_handle);
     if (err != ESP_OK) {
-        ESP_LOGE(TAG, "i2s_channel_init_std_mode failed: %s",
+        ESP_LOGE(TAG, "dac_continuous_new_channels failed: %s",
                  esp_err_to_name(err));
-        i2s_del_channel(s_i2s_tx_chan);
-        s_i2s_tx_chan = NULL;
         return err;
     }
 
-    err = i2s_channel_enable(s_i2s_tx_chan);
+    err = dac_continuous_enable(s_dac_handle);
     if (err != ESP_OK) {
-        ESP_LOGE(TAG, "i2s_channel_enable failed: %s", esp_err_to_name(err));
-        i2s_del_channel(s_i2s_tx_chan);
-        s_i2s_tx_chan = NULL;
+        ESP_LOGE(TAG, "dac_continuous_enable failed: %s",
+                 esp_err_to_name(err));
+        dac_continuous_del_channels(s_dac_handle);
+        s_dac_handle = NULL;
         return err;
     }
 
-    ESP_LOGI(TAG, "I2S init OK: %d Hz, port=%d bck=%d ws=%d dout=%d",
-             SN76489_AUDIO_SAMPLE_RATE, SN76489_I2S_PORT,
-             SN76489_I2S_BCK_PIN, SN76489_I2S_WS_PIN, SN76489_I2S_DATA_PIN);
+    ESP_LOGI(TAG, "DAC audio init OK: %d Hz on GPIO 25",
+             SN76489_AUDIO_SAMPLE_RATE);
     return ESP_OK;
 }
 
 /* --------------------------------------------------------------------------
- * Public: render one DMA buffer and send to I2S
+ * Public: render one buffer and push it to the DAC
  *
- * Call this from a dedicated FreeRTOS task.  The i2s_channel_write() call
- * blocks until the DMA buffer is consumed, providing natural pacing.
- *
- * psg: pointer to an initialised sn76489_t (must have sample_rate set to
- *      SN76489_AUDIO_SAMPLE_RATE at init time).
+ * The SN76489 renders signed 16-bit mono; we convert to 8-bit unsigned
+ * (add 32768, shift right 8) and write cyclically to the DAC DMA ring.
+ * dac_continuous_write_cyclically() blocks until the buffer fits.
  * -------------------------------------------------------------------------- */
 void sn76489_audio_push(sn76489_t *psg)
 {
-    if (!s_i2s_tx_chan) return;
+    if (!s_dac_handle) return;
 
-    /* Render mono samples */
-    int16_t mono[SN76489_AUDIO_DMA_BUF_LEN];
-    sn76489_render(psg, mono, SN76489_AUDIO_DMA_BUF_LEN);
+    /* Render signed 16-bit mono samples */
+    int16_t mono[SN76489_AUDIO_BUF_SAMPLES];
+    sn76489_render(psg, mono, SN76489_AUDIO_BUF_SAMPLES);
 
-    /* Expand mono → stereo interleaved (L, R) */
-    for (int i = 0; i < SN76489_AUDIO_DMA_BUF_LEN; i++) {
-        s_dma_buf[i * 2]     = mono[i];
-        s_dma_buf[i * 2 + 1] = mono[i];
+    /* Convert signed 16-bit → unsigned 8-bit for DAC */
+    for (int i = 0; i < SN76489_AUDIO_BUF_SAMPLES; i++) {
+        /* mono[i] is in [-32768, 32767]; map to [0, 255] */
+        int32_t v = (int32_t)mono[i] + 32768;   /* → [0, 65535] */
+        s_dac_buf[i] = (uint8_t)(v >> 8);        /* → [0, 255]   */
     }
 
-    size_t written = 0;
-    esp_err_t err = i2s_channel_write(
-        s_i2s_tx_chan,
-        s_dma_buf,
-        sizeof(s_dma_buf),
-        &written,
-        portMAX_DELAY);
+    size_t loaded = 0;
+    esp_err_t err = dac_continuous_write_cyclically(
+        s_dac_handle,
+        s_dac_buf,
+        sizeof(s_dac_buf),
+        &loaded);
     if (err != ESP_OK) {
-        ESP_LOGW(TAG, "i2s_channel_write error: %s", esp_err_to_name(err));
+        ESP_LOGW(TAG, "dac_continuous_write_cyclically error: %s",
+                 esp_err_to_name(err));
     }
 }
 
 /* --------------------------------------------------------------------------
- * Public: stop and free I2S channel
+ * Public: stop and free DAC channel
  * -------------------------------------------------------------------------- */
 void sn76489_audio_deinit(void)
 {
-    if (s_i2s_tx_chan) {
-        i2s_channel_disable(s_i2s_tx_chan);
-        i2s_del_channel(s_i2s_tx_chan);
-        s_i2s_tx_chan = NULL;
-        ESP_LOGI(TAG, "I2S deinit OK");
+    if (s_dac_handle) {
+        dac_continuous_disable(s_dac_handle);
+        dac_continuous_del_channels(s_dac_handle);
+        s_dac_handle = NULL;
+        ESP_LOGI(TAG, "DAC audio deinit OK");
     }
 }
 
