@@ -58,13 +58,13 @@ extern "C" {
 /* ------------------------------------------------------------------
  * Keyboard matrix
  *
- * BBC Model B keyboard: 10 rows × 8 columns.  Bit 7 of port-A on the
- * system VIA selects which row/column is being scanned (when
- * KB_AUTOSCAN latch bit is clear).  We expose a simple pressed-state
- * bitmap for the calling layer to populate.
+ * BBC Model B keyboard: 8 rows × 10 columns.
+ * MOS writes (row<<4)|col to Port A; row = bits 6:4, col = bits 3:0.
+ * Row 0: Shift(col0), Ctrl(col1)
+ * Rows 1-7: letter/number/function keys (cols 0-9)
  * ------------------------------------------------------------------ */
-#define BBC_KB_ROWS  10
-#define BBC_KB_COLS   8
+#define BBC_KB_ROWS   8
+#define BBC_KB_COLS  10
 
 typedef struct {
     bool pressed[BBC_KB_ROWS][BBC_KB_COLS];
@@ -146,7 +146,7 @@ void bbc_machine_mount_disk(bbc_machine_t *m, uint8_t drive,
 
 /*
  * Set / clear a key in the keyboard matrix.
- *   row  0–9, col  0–7
+ *   row  0–7, col  0–9
  */
 void bbc_machine_key_event(bbc_machine_t *m, uint8_t row, uint8_t col, bool pressed);
 

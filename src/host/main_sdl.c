@@ -139,94 +139,110 @@ static uint8_t *load_rom(const char *path, uint32_t *out_size)
 
 /* -------------------------------------------------------------------------
  * BBC keyboard matrix: SDL scancode → (row, col)
- * Same layout as main.cpp vk_to_bbc()
+ *
+ * Layout matches B-em / BBC Advanced User Guide physical layout.
+ * BBC keycode = (row << 4) | col where:
+ *
+ *       col:  0     1     2     3     4     5     6     7     8     9
+ * row 0:   Shift  Ctrl  --DIP--  --DIP--  --DIP--  --DIP--  --DIP--  --DIP--
+ * row 1:   Q      3     4     5     f4    8     f7    -=    ~^    Left
+ * row 2:   f0     W     E     T     7     I     9     0     £     Down
+ * row 3:   1      2     D     R     6     U     O     P     [{    Up
+ * row 4:   Caps   A     X     F     Y     J     K     @     :*    Return
+ * row 5:   ShLk   S     C     G     H     N     L     ;+    ]}    Delete
+ * row 6:   Tab    Z     Spc   V     B     M     <,    >.    /?    Copy
+ * row 7:   Esc    f1    f2    f3    f5    f6    f8    f9    \|    Right
  * ------------------------------------------------------------------------- */
 typedef struct { int row; int col; } BbcKey;
 
 static BbcKey sdl_to_bbc(SDL_Scancode sc)
 {
     switch (sc) {
-    /* Row 0 */
+    /* Row 0: Shift, Ctrl */
     case SDL_SCANCODE_LSHIFT:
-    case SDL_SCANCODE_RSHIFT:   return (BbcKey){0,0};
-    case SDL_SCANCODE_Q:        return (BbcKey){0,1};
-    case SDL_SCANCODE_F10:      return (BbcKey){0,2};  /* F0 */
-    case SDL_SCANCODE_1:        return (BbcKey){0,3};
-    case SDL_SCANCODE_CAPSLOCK: return (BbcKey){0,4};
-    case SDL_SCANCODE_TAB:      return (BbcKey){0,6};
-    case SDL_SCANCODE_ESCAPE:   return (BbcKey){0,7};
-    /* Row 1 */
+    case SDL_SCANCODE_RSHIFT:    return (BbcKey){0, 0};
     case SDL_SCANCODE_LCTRL:
-    case SDL_SCANCODE_RCTRL:    return (BbcKey){1,0};
-    case SDL_SCANCODE_3:        return (BbcKey){1,1};
-    case SDL_SCANCODE_W:        return (BbcKey){1,2};
-    case SDL_SCANCODE_2:        return (BbcKey){1,3};
-    case SDL_SCANCODE_A:        return (BbcKey){1,4};
-    case SDL_SCANCODE_S:        return (BbcKey){1,5};
-    case SDL_SCANCODE_Z:        return (BbcKey){1,6};
+    case SDL_SCANCODE_RCTRL:     return (BbcKey){0, 1};
+    /* Row 1 */
+    case SDL_SCANCODE_Q:         return (BbcKey){1, 0};
+    case SDL_SCANCODE_3:         return (BbcKey){1, 1};
+    case SDL_SCANCODE_4:         return (BbcKey){1, 2};
+    case SDL_SCANCODE_5:         return (BbcKey){1, 3};
+    case SDL_SCANCODE_F4:        return (BbcKey){1, 4};
+    case SDL_SCANCODE_8:         return (BbcKey){1, 5};
+    case SDL_SCANCODE_F7:        return (BbcKey){1, 6};
+    case SDL_SCANCODE_MINUS:     return (BbcKey){1, 7};
+    case SDL_SCANCODE_LEFT:      return (BbcKey){1, 9};
     /* Row 2 */
-    case SDL_SCANCODE_4:        return (BbcKey){2,1};
-    case SDL_SCANCODE_E:        return (BbcKey){2,2};
-    case SDL_SCANCODE_R:        return (BbcKey){2,3};
-    case SDL_SCANCODE_D:        return (BbcKey){2,4};
-    case SDL_SCANCODE_F:        return (BbcKey){2,5};
-    case SDL_SCANCODE_X:        return (BbcKey){2,6};
-    case SDL_SCANCODE_C:        return (BbcKey){2,7};
+    case SDL_SCANCODE_F10:       return (BbcKey){2, 0};  /* f0 */
+    case SDL_SCANCODE_W:         return (BbcKey){2, 1};
+    case SDL_SCANCODE_E:         return (BbcKey){2, 2};
+    case SDL_SCANCODE_T:         return (BbcKey){2, 3};
+    case SDL_SCANCODE_7:         return (BbcKey){2, 4};
+    case SDL_SCANCODE_I:         return (BbcKey){2, 5};
+    case SDL_SCANCODE_9:         return (BbcKey){2, 6};
+    case SDL_SCANCODE_0:         return (BbcKey){2, 7};
+    case SDL_SCANCODE_DOWN:      return (BbcKey){2, 9};
     /* Row 3 */
-    case SDL_SCANCODE_5:        return (BbcKey){3,1};
-    case SDL_SCANCODE_T:        return (BbcKey){3,2};
-    case SDL_SCANCODE_6:        return (BbcKey){3,3};
-    case SDL_SCANCODE_G:        return (BbcKey){3,4};
-    case SDL_SCANCODE_H:        return (BbcKey){3,5};
-    case SDL_SCANCODE_V:        return (BbcKey){3,6};
-    case SDL_SCANCODE_B:        return (BbcKey){3,7};
+    case SDL_SCANCODE_1:         return (BbcKey){3, 0};
+    case SDL_SCANCODE_2:         return (BbcKey){3, 1};
+    case SDL_SCANCODE_D:         return (BbcKey){3, 2};
+    case SDL_SCANCODE_R:         return (BbcKey){3, 3};
+    case SDL_SCANCODE_6:         return (BbcKey){3, 4};
+    case SDL_SCANCODE_U:         return (BbcKey){3, 5};
+    case SDL_SCANCODE_O:         return (BbcKey){3, 6};
+    case SDL_SCANCODE_P:         return (BbcKey){3, 7};
+    case SDL_SCANCODE_UP:        return (BbcKey){3, 9};
     /* Row 4 */
-    case SDL_SCANCODE_F4:       return (BbcKey){4,1};
-    case SDL_SCANCODE_7:        return (BbcKey){4,2};
-    case SDL_SCANCODE_8:        return (BbcKey){4,3};
-    case SDL_SCANCODE_Y:        return (BbcKey){4,4};
-    case SDL_SCANCODE_J:        return (BbcKey){4,5};
-    case SDL_SCANCODE_N:        return (BbcKey){4,6};
-    case SDL_SCANCODE_SPACE:    return (BbcKey){4,7};
-    /* Row 5 */
-    case SDL_SCANCODE_F5:       return (BbcKey){5,1};
-    case SDL_SCANCODE_I:        return (BbcKey){5,2};
-    case SDL_SCANCODE_O:        return (BbcKey){5,3};
-    case SDL_SCANCODE_U:        return (BbcKey){5,4};
-    case SDL_SCANCODE_K:        return (BbcKey){5,5};
-    case SDL_SCANCODE_M:        return (BbcKey){5,6};
-    case SDL_SCANCODE_COMMA:    return (BbcKey){5,7};
-    /* Row 6 */
-    case SDL_SCANCODE_F6:       return (BbcKey){6,1};
-    case SDL_SCANCODE_9:        return (BbcKey){6,2};
-    case SDL_SCANCODE_0:        return (BbcKey){6,3};
-    case SDL_SCANCODE_P:        return (BbcKey){6,4};
-    case SDL_SCANCODE_L:        return (BbcKey){6,5};
-    case SDL_SCANCODE_PERIOD:   return (BbcKey){6,7};
-    /* Row 7 */
-    case SDL_SCANCODE_F7:       return (BbcKey){7,1};
-    case SDL_SCANCODE_MINUS:    return (BbcKey){7,2};
-    case SDL_SCANCODE_EQUALS:   return (BbcKey){7,3};
-    case SDL_SCANCODE_APOSTROPHE: return (BbcKey){7,4}; /* @ */
-    case SDL_SCANCODE_SEMICOLON:return (BbcKey){7,5};
-    case SDL_SCANCODE_SLASH:    return (BbcKey){7,6};
-    /* Row 8 */
-    case SDL_SCANCODE_F1:       return (BbcKey){8,0};
-    case SDL_SCANCODE_F2:       return (BbcKey){8,1};
-    case SDL_SCANCODE_F3:       return (BbcKey){8,2};
-    case SDL_SCANCODE_F12:      return (BbcKey){8,3};  /* BREAK */
-    case SDL_SCANCODE_UP:       return (BbcKey){8,5};
-    case SDL_SCANCODE_DELETE:
-    case SDL_SCANCODE_BACKSPACE:return (BbcKey){8,7};
-    /* Row 9 */
-    case SDL_SCANCODE_END:      return (BbcKey){9,3};  /* COPY */
-    case SDL_SCANCODE_RIGHT:    return (BbcKey){9,5};
+    case SDL_SCANCODE_CAPSLOCK:  return (BbcKey){4, 0};
+    case SDL_SCANCODE_A:         return (BbcKey){4, 1};
+    case SDL_SCANCODE_X:         return (BbcKey){4, 2};
+    case SDL_SCANCODE_F:         return (BbcKey){4, 3};
+    case SDL_SCANCODE_Y:         return (BbcKey){4, 4};
+    case SDL_SCANCODE_J:         return (BbcKey){4, 5};
+    case SDL_SCANCODE_K:         return (BbcKey){4, 6};
+    case SDL_SCANCODE_APOSTROPHE:return (BbcKey){4, 7};  /* @ */
     case SDL_SCANCODE_RETURN:
-    case SDL_SCANCODE_KP_ENTER: return (BbcKey){9,6};
-    /* Left / Down not in BBC matrix — map to cursor via shift */
-    case SDL_SCANCODE_LEFT:     return (BbcKey){9,5};  /* same wire, use shift */
-    case SDL_SCANCODE_DOWN:     return (BbcKey){8,5};
-    default:                    return (BbcKey){-1,-1};
+    case SDL_SCANCODE_KP_ENTER:  return (BbcKey){4, 9};
+    /* Row 5 */
+    /* ShiftLock = col 0 row 5 — no standard SDL key */
+    case SDL_SCANCODE_S:         return (BbcKey){5, 1};
+    case SDL_SCANCODE_C:         return (BbcKey){5, 2};
+    case SDL_SCANCODE_G:         return (BbcKey){5, 3};
+    case SDL_SCANCODE_H:         return (BbcKey){5, 4};
+    case SDL_SCANCODE_N:         return (BbcKey){5, 5};
+    case SDL_SCANCODE_L:         return (BbcKey){5, 6};
+    case SDL_SCANCODE_SEMICOLON: return (BbcKey){5, 7};
+    case SDL_SCANCODE_DELETE:
+    case SDL_SCANCODE_BACKSPACE: return (BbcKey){5, 9};
+    /* Row 6 */
+    case SDL_SCANCODE_TAB:       return (BbcKey){6, 0};
+    case SDL_SCANCODE_Z:         return (BbcKey){6, 1};
+    case SDL_SCANCODE_SPACE:     return (BbcKey){6, 2};
+    case SDL_SCANCODE_V:         return (BbcKey){6, 3};
+    case SDL_SCANCODE_B:         return (BbcKey){6, 4};
+    case SDL_SCANCODE_M:         return (BbcKey){6, 5};
+    case SDL_SCANCODE_COMMA:     return (BbcKey){6, 6};
+    case SDL_SCANCODE_PERIOD:    return (BbcKey){6, 7};
+    case SDL_SCANCODE_SLASH:     return (BbcKey){6, 8};
+    case SDL_SCANCODE_END:       return (BbcKey){6, 9};  /* Copy */
+    /* Row 7 */
+    case SDL_SCANCODE_ESCAPE:    return (BbcKey){7, 0};
+    case SDL_SCANCODE_F1:        return (BbcKey){7, 1};
+    case SDL_SCANCODE_F2:        return (BbcKey){7, 2};
+    case SDL_SCANCODE_F3:        return (BbcKey){7, 3};
+    case SDL_SCANCODE_F5:        return (BbcKey){7, 4};
+    case SDL_SCANCODE_F6:        return (BbcKey){7, 5};
+    case SDL_SCANCODE_F8:        return (BbcKey){7, 6};
+    case SDL_SCANCODE_F9:        return (BbcKey){7, 7};
+    case SDL_SCANCODE_BACKSLASH: return (BbcKey){7, 8};
+    case SDL_SCANCODE_RIGHT:     return (BbcKey){7, 9};
+    /* Extra keys */
+    case SDL_SCANCODE_EQUALS:       return (BbcKey){1, 8};  /* ^ / ~ on BBC */
+    case SDL_SCANCODE_LEFTBRACKET:  return (BbcKey){3, 8};  /* [ / { */
+    case SDL_SCANCODE_RIGHTBRACKET: return (BbcKey){5, 8};  /* ] / } */
+    case SDL_SCANCODE_GRAVE:        return (BbcKey){1, 8};  /* ~ / ^ */
+    default:                     return (BbcKey){-1, -1};
     }
 }
 

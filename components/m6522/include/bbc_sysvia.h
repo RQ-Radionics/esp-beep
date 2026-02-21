@@ -43,13 +43,16 @@ typedef struct {
     void (*sound_write)(void *user_ctx, uint8_t data);
 
     /*
-     * Read one row of the keyboard matrix for the given column.
-     * col: 0-14 (bits 0-3 of Port A select column; row 3 is bit 7 of Port A)
-     * Returns: bit mask of rows pressed (bit 0 = row 0 … bit 6 = row 6);
-     *          bit 7 = 1 if ANY key in that column is pressed (for auto-scan).
-     * Return 0x00 if no keys pressed.
+     * Check if a specific key is pressed.
+     * row: 0-7  (bits 6:4 of Port A — MOS writes (row<<4)|col to Port A)
+     * col: 0-14 (bits 3:0 of Port A)
+     * Returns: true if the key at (row, col) is currently pressed.
+     *
+     * BBC hardware: bit 7 of Port A reads LOW when the key is pressed
+     * (active-low). The sysvia layer handles the inversion; this callback
+     * just returns the logical pressed state.
      */
-    uint8_t (*keyboard_read)(void *user_ctx, uint8_t col);
+    bool (*keyboard_read)(void *user_ctx, uint8_t row, uint8_t col);
 
     /*
      * Called whenever the IC32 addressable latch value changes.
@@ -74,7 +77,6 @@ typedef struct {
 typedef struct {
     m6522_t  via;            /* Generic 6522 VIA                        */
     uint8_t  latch;          /* Current IC32 state (8 bits)             */
-    uint8_t  kbd_col;        /* Current keyboard column selected (0-14) */
     bool     joy_fire0;      /* Joystick fire button 0 (PB4, active low)*/
     bool     joy_fire1;      /* Joystick fire button 1 (PB5, active low)*/
     bbc_sysvia_callbacks_t cb;

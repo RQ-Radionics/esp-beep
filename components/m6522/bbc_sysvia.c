@@ -77,19 +77,17 @@ static void sysvia_check_sound(bbc_sysvia_t *sv, uint8_t old_latch)
 static void sysvia_port_out(void *user_ctx, uint8_t port, uint8_t val, uint8_t ddr)
 {
     bbc_sysvia_t *sv = (bbc_sysvia_t *)user_ctx;
+    (void)ddr;
 
     if (port == 1) {
         /* Port B → addressable latch IC32 */
         uint8_t old_latch = sv->latch;
         sysvia_update_latch(sv, val);
         sysvia_check_sound(sv, old_latch);
-
-        /* Update keyboard column from slow data bus lower nibble */
-        sv->kbd_col = sv->via.pa.outr & 0x0F;
     } else {
-        /* Port A (slow data bus) → SN76489 if WE is active */
-        uint8_t old_latch = sv->latch;
-        (void)old_latch;
+        /* Port A (slow data bus) — keyboard row/col select + SN76489 data.
+         * MOS writes (row<<4)|col to Port A to select a keyboard position.
+         * If sound WE is active-low, also write to PSG. */
         SV_LOGD("port A out %02X ddr=%02X", val, ddr);
         if (!(sv->latch & (1u << BBC_LATCH_SOUND_WE))) {
             if (sv->cb.sound_write)
@@ -104,17 +102,38 @@ static uint8_t sysvia_port_in(void *user_ctx, uint8_t port)
 
     if (port == 0) {
         /*
-         * Port A (slow data bus) — read keyboard matrix.
-         * Column selected by bits 3:0 of Port A output (or latched column).
-         * Bit 7 of the return value is 0 if any key in that column is pressed
-         * (active-low on real hardware, but many emulators invert this).
+         * Port A (slow data bus) — keyboard matrix read.
+         *
+         * MOS writes (row<<4)|col to Port A then reads back:
+         *   bits 6:4 = row (which the MOS wrote as the row select)
+         *   bits 3:0 = col
+         *   bit 7    = 0 if key at (row,col) is pressed (active LOW)
+         *              1 if no key pressed at that position
+         *
+         * The keyboard is only read when IC32 bit 3 (KBD_WE) is LOW.
+         * When IC32 bit 3 is HIGH (auto-scan disabled) bit 7 = 1.
          */
-        if (sv->cb.keyboard_read) {
-            uint8_t kbd = sv->cb.keyboard_read(sv->cb.user_ctx, sv->kbd_col);
-            SV_LOGD("kbd read col=%d -> %02X", sv->kbd_col, kbd);
-            return kbd;
+        uint8_t pa_out = sv->via.pa.outr;
+        uint8_t row = (pa_out >> 4) & 0x07;
+        uint8_t col = pa_out & 0x0F;
+
+        /* Default: bit 7 = 0 (no key detected).
+         * BBC Model B: when KBD_WE (IC32 bit 3) is LOW and the key at
+         * (row, col) is pressed, bit 7 of the slow data bus is driven HIGH.
+         * The MOS reads this as: bit7=1 → key found; bit7=0 → not found. */
+        uint8_t result = pa_out & 0x7Fu;  /* clear bit 7 by default */
+
+        /* Only drive the keyboard output when KBD_WE is LOW (active) */
+        if (!(sv->latch & (1u << BBC_LATCH_KB_AUTOSCAN))) {
+            if (sv->cb.keyboard_read &&
+                sv->cb.keyboard_read(sv->cb.user_ctx, row, col)) {
+                /* Key is pressed — drive bit 7 HIGH */
+                result |= 0x80u;
+            }
         }
-        return 0xFF;  /* no keys pressed */
+
+        SV_LOGD("kbd read row=%d col=%d -> bit7=%d", row, col, (result >> 7) & 1);
+        return result;
     }
 
     /* Port B */
@@ -159,7 +178,6 @@ void bbc_sysvia_reset(bbc_sysvia_t *sv)
 {
     m6522_reset(&sv->via);
     sv->latch     = 0;
-    sv->kbd_col   = 0;
     sv->joy_fire0 = false;
     sv->joy_fire1 = false;
     SV_LOGD("reset");

@@ -14,7 +14,7 @@
 
 /* sysvia callbacks */
 static void     sv_sound_write  (void *ctx, uint8_t data);
-static uint8_t  sv_keyboard_read(void *ctx, uint8_t col);
+static bool     sv_keyboard_read(void *ctx, uint8_t row, uint8_t col);
 static void     sv_latch_changed(void *ctx, uint8_t latch_bits);
 static void     sv_irq          (void *ctx, bool state);
 
@@ -273,22 +273,16 @@ static void sv_sound_write(void *ctx, uint8_t data) {
     sn76489_write(&m->psg, data);
 }
 
-static uint8_t sv_keyboard_read(void *ctx, uint8_t col) {
+static bool sv_keyboard_read(void *ctx, uint8_t row, uint8_t col) {
     bbc_machine_t *m = (bbc_machine_t *)ctx;
     /*
-     * BBC keyboard scan: the system VIA drives port A bits [3:0] as the
-     * column select; bit 7 of port A is the "BREAK" key.  For now we
-     * check all rows for the given column.
+     * BBC keyboard scan: MOS writes (row<<4)|col to Port A, then reads
+     * bit 7 — LOW means key pressed (active low on real hardware).
+     * We return true if the key at (row, col) is pressed.
      */
-    uint8_t result = 0;
-    if (col < BBC_KB_COLS) {
-        for (uint8_t row = 0; row < BBC_KB_ROWS; row++) {
-            if (m->keyboard.pressed[row][col]) {
-                result |= (uint8_t)(1u << row);
-            }
-        }
-    }
-    return result;
+    if (row < BBC_KB_ROWS && col < BBC_KB_COLS)
+        return m->keyboard.pressed[row][col];
+    return false;
 }
 
 static void sv_irq(void *ctx, bool state) {
