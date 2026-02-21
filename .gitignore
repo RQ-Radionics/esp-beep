@@ -53,3 +53,16 @@ dkms.conf
 
 # debug information files
 *.dwo
+
+# PlatformIO
+.pio
+.vscode
+
+# ESP-IDF
+dependencies.lock
+__pycache__/
+*.pyc
+.pytest_cache/
+.espressif/
+build/
+sdkconfig

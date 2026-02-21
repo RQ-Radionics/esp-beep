@@ -1,0 +1,19 @@
+menu "FabGL Configuration"
+    config FABGL_HAS_PS2KEYBOARD
+        bool "Enable PS/2 Keyboard support"
+        default y
+        help
+            Enable PS/2 Keyboard support
+
+    config FABGL_HAS_PS2MOUSE
+        bool "Enable PS/2 Mouse support"
+        default n
+        help
+            Enable PS/2 Mouse support
+
+    config FABGL_HAS_I2S
+        bool "Enable I2S for video/audio"
+        default y
+        help
+            Enable I2S for video generation and audio
+endmenu
