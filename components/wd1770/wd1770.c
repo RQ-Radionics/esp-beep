@@ -307,7 +307,14 @@ static void cmd_next(wd1770_t *fdc)
             break;
 
         case 0x8: /* Read single sector complete */
-            completed(fdc);
+            /* Only complete once all bytes have been consumed by the CPU.
+             * If bytes remain the CPU has not finished reading via DRQ/NMI;
+             * reschedule so we poll again shortly. */
+            if (fdc->buf_pos < fdc->buf_count) {
+                fdc->delay_cycles = DELAY_COMPLETE;
+            } else {
+                completed(fdc);
+            }
             break;
 
         case 0x9: /* Read multiple sectors */
