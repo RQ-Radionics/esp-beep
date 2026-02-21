@@ -6,6 +6,7 @@ set(EXTRA_COMPONENT_DIRS
     components/bbc_memory
     components/bbc_video
     components/fabgl
+    components/wd1770
 )
 
 include($ENV{IDF_PATH}/tools/cmake/project.cmake)
