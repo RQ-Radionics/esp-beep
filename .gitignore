@@ -57,6 +57,9 @@ dkms.conf
 # Editor
 .vscode
 
+# Beads issue tracker (dolt DB — local only, breaks PRs)
+.beads/dolt/
+
 # ESP-IDF
 dependencies.lock
 __pycache__/
