@@ -99,8 +99,9 @@ typedef struct {
     /* IRQ line state */
     bbc_irq_state_t  irq;
 
-    /* Cycle accumulator for peripheral ticking */
+    /* Cycle accumulators for peripheral ticking */
     int32_t          cycle_acc;
+    int32_t          crtc_acc;   /* sub-cycle acc for CRTC 1 MHz tick */
 
     /* Video framebuffer output (set by caller before init) */
     bbc_video_output_t *fb_output;   /* NULL = no display */

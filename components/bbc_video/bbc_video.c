@@ -162,9 +162,12 @@ void bbc_video_vidproc_write(bbc_video_t *video, uint8_t addr, uint8_t data)
  * -------------------------------------------------------------------------- */
 void bbc_video_tick(bbc_video_t *video)
 {
-    if (!video->output.framebuffer || !video->system_ram) return;
-
+    /* Always tick the CRTC — it generates VSYNC which drives the MOS IRQ.
+     * The framebuffer render is skipped if there is no framebuffer, but the
+     * CRTC timing must run regardless (e.g. host build with render_row). */
     mc6845_output_t out = mc6845_tick(&video->crtc);
+
+    if (!video->output.framebuffer || !video->system_ram) return;
     if (!out.display_enable) return;
 
     const mc6845_t *crtc = &video->crtc;

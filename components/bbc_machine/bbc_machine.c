@@ -185,7 +185,17 @@ int bbc_machine_step(bbc_machine_t *m) {
     bbc_uservia_tick(&m->uservia, cycles);
     wd1770_tick     (&m->fdc,     cycles);
 
-    /* SN76489 ticking is handled by sn76489_audio_push() in the audio task */
+    /* Tick CRTC at 1 MHz (= CPU / 2).  bbc_video_tick() generates VSYNC
+     * which drives the MOS frame IRQ via System VIA CA1.  Without this the
+     * keyboard scanner in the MOS never runs.
+     * Use a sub-cycle accumulator to approximate the 2:1 ratio. */
+    m->crtc_acc += cycles;
+    while (m->crtc_acc >= 2) {
+        bbc_video_tick(&m->video);
+        m->crtc_acc -= 2;
+    }
+
+    /* SN76489 ticking is handled by sn76489_audio_push() / sn76489_render() */
 
     return cycles;
 }
