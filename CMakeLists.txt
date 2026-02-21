@@ -8,6 +8,7 @@ set(EXTRA_COMPONENT_DIRS
     components/fabgl
     components/wd1770
     components/m6522
+    components/sn76489
 )
 
 include($ENV{IDF_PATH}/tools/cmake/project.cmake)
