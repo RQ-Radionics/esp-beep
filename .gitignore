@@ -60,6 +60,9 @@ dkms.conf
 # Beads issue tracker (dolt DB — local only, breaks PRs)
 .beads/dolt/
 
+# Host build output
+src/host/bbc-beep
+
 # ESP-IDF
 dependencies.lock
 __pycache__/
