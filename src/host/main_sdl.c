@@ -435,6 +435,16 @@ int main(int argc, char *argv[])
                     s_running = false;
                     break;
                 }
+                /* F12 (or F11) = BBC BREAK key (soft reset, RAM preserved).
+                 * Shift+F12 / Shift+F11 = SHIFT+BREAK (disc autoboot). */
+                SDL_Scancode sc = ev.key.keysym.scancode;
+                if (ev.type == SDL_KEYDOWN &&
+                    (sc == SDL_SCANCODE_F12 || sc == SDL_SCANCODE_F11)) {
+                    bool shift = (ev.key.keysym.mod & KMOD_SHIFT) != 0;
+                    printf("[host] BREAK%s\n", shift ? " (SHIFT)" : "");
+                    bbc_machine_break(s_machine, shift);
+                    continue;
+                }
                 BbcKey k = sdl_to_bbc(ev.key.keysym.scancode);
                 if (k.row >= 0)
                     bbc_machine_key_event(s_machine,

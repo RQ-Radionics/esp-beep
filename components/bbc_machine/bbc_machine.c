@@ -190,6 +190,53 @@ void bbc_machine_reset(bbc_machine_t *m) {
 }
 
 /* ======================================================================
+ * bbc_machine_break
+ *
+ * Soft BREAK: reset CPU + peripherals without clearing RAM.
+ *
+ * On real BBC hardware the BREAK key pulls /RESET low for ~200 ms.
+ * The OS reset handler reads $FE4E (VIA IER) to distinguish BREAK from
+ * power-on, then reads $0258 to detect Ctrl-BREAK.  What matters for the
+ * DFS banner is that ZP $EF survives (it is set to 'D'/0x44 by the DFS
+ * workspace-init code during the first reset, so on subsequent BREAKs the
+ * DFS can see it and print its banner).
+ *
+ * We also write $0258 bit 1 to communicate shift_held so the OS can tell
+ * the DFS to autoboot (SHIFT+BREAK).
+ * ====================================================================== */
+
+void bbc_machine_break(bbc_machine_t *m, bool shift_held) {
+    uint8_t *ram = bbc_memory_get_ram(m->mem);
+
+    /* $0258: BBC OS "break key state" — bit 0 = Ctrl held, bit 1 = Shift held.
+     * The DFS reads this to decide whether to autoboot. */
+    if (ram) {
+        ram[0x0258] = shift_held ? 0x02 : 0x00;
+    }
+
+    /* Reset peripherals (preserves RAM) */
+    bbc_sysvia_reset(&m->sysvia);
+    bbc_uservia_reset(&m->uservia);
+    wd1770_reset(&m->fdc);
+    sn76489_reset(&m->psg);
+    bbc_video_reset(&m->video);
+
+    m->irq.sysvia  = false;
+    m->irq.uservia = false;
+    m->cycle_acc   = 0;
+    m->crtc_acc    = 0;
+
+    if (m->fb_output) {
+        bbc_video_set_output(&m->video, m->fb_output);
+    }
+    if (m->on_frame) {
+        bbc_video_set_frame_callback(&m->video, m->on_frame, m->on_frame_ctx);
+    }
+
+    bbc_cpu_reset(m->cpu);
+}
+
+/* ======================================================================
  * bbc_machine_step
  * ====================================================================== */
 

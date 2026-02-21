@@ -143,6 +143,20 @@ void bbc_machine_load_sideways_rom(bbc_machine_t *m,
 void bbc_machine_reset(bbc_machine_t *m);
 
 /*
+ * Soft BREAK — resets CPU and peripherals but preserves RAM contents.
+ * This matches the BBC hardware BREAK key behaviour: the 6502 /RESET line
+ * is asserted but the RAM is not cleared.  Zero-page variables (including
+ * $EF which the DFS uses to identify the reset type) survive, so sideways
+ * ROMs can detect the difference between power-on and BREAK and print their
+ * banners accordingly.
+ *
+ * shift_held: if true, Shift is asserted in the keyboard matrix for one
+ * reset cycle so that the DFS (and BASIC) see a SHIFT+BREAK and perform
+ * disc autoboot (*EXEC !BOOT).
+ */
+void bbc_machine_break(bbc_machine_t *m, bool shift_held);
+
+/*
  * Step the emulator: execute one CPU instruction and tick all
  * peripherals by the resulting number of cycles.
  * Returns the number of cycles consumed.
