@@ -74,8 +74,8 @@ void bbc_machine_init(bbc_machine_t *m,
     /* The CPU read/write callbacks just call through to bbc_memory.    */
     /* We store m itself as userData so the wrappers can access m->mem. */
     m->cpu = bbc_cpu_create(
-        /* read  */ (BBCMemoryRead)  bbc_memory_read,
-        /* write */ (BBCMemoryWrite) bbc_memory_write,
+        /* read  */ bbc_memory_read,
+        /* write */ bbc_memory_write,
         /* ctx   */ m->mem
     );
 

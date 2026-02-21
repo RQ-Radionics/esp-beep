@@ -19,21 +19,15 @@ struct BBCCPU {
 
 /* vrEmu6502 global read/write callbacks */
 static uint8_t cpu_mem_read(uint16_t addr, bool isDbg) {
-    if (s_active_cpu && s_active_cpu->readCallback && !isDbg) {
-        return s_active_cpu->readCallback(addr, s_active_cpu->userData);
-    }
-    if (s_active_cpu && s_active_cpu->readCallback && isDbg) {
-        /* Debug reads should not cause side-effects; still forward but
-         * the memory system's read is side-effect-free for ROM/RAM.     */
-        return s_active_cpu->readCallback(addr, s_active_cpu->userData);
-    }
+    (void)isDbg;
+    if (s_active_cpu && s_active_cpu->readCallback)
+        return s_active_cpu->readCallback(s_active_cpu->userData, addr);
     return 0xFF;
 }
 
 static void cpu_mem_write(uint16_t addr, uint8_t value) {
-    if (s_active_cpu && s_active_cpu->writeCallback) {
-        s_active_cpu->writeCallback(addr, value, s_active_cpu->userData);
-    }
+    if (s_active_cpu && s_active_cpu->writeCallback)
+        s_active_cpu->writeCallback(s_active_cpu->userData, addr, value);
 }
 
 BBCCPU *bbc_cpu_create(BBCMemoryRead readCallback, BBCMemoryWrite writeCallback, void *userData) {

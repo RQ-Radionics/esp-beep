@@ -14,9 +14,9 @@ typedef struct BBCMemory BBCMemory;
 BBCMemory *bbc_memory_create(void);
 void       bbc_memory_destroy(BBCMemory *mem);
 
-/* CPU-facing read/write */
-uint8_t    bbc_memory_read (BBCMemory *mem, uint16_t addr);
-void       bbc_memory_write(BBCMemory *mem, uint16_t addr, uint8_t value);
+/* CPU-facing read/write — first arg is void* to match BBCMemoryRead/Write */
+uint8_t    bbc_memory_read (void *mem, uint16_t addr);
+void       bbc_memory_write(void *mem, uint16_t addr, uint8_t value);
 
 /* ROM loading — startAddr must be 0x8000 (sideways) or 0xC000 (OS) */
 void bbc_memory_load_rom(BBCMemory *mem, const uint8_t *romData,

@@ -68,7 +68,7 @@ void bbc_memory_destroy(BBCMemory *mem) {
     free(mem);
 }
 
-uint8_t bbc_memory_read(BBCMemory *mem, uint16_t addr) {
+uint8_t bbc_memory_read(void *mem, uint16_t addr) {
     BBCMemoryInternal *m = (BBCMemoryInternal *)mem;
     if (!m) return 0xFF;
 
@@ -93,7 +93,7 @@ uint8_t bbc_memory_read(BBCMemory *mem, uint16_t addr) {
     }
 }
 
-void bbc_memory_write(BBCMemory *mem, uint16_t addr, uint8_t value) {
+void bbc_memory_write(void *mem, uint16_t addr, uint8_t value) {
     BBCMemoryInternal *m = (BBCMemoryInternal *)mem;
     if (!m) return;
 
