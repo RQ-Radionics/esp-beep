@@ -66,3 +66,4 @@ __pycache__/
 .espressif/
 build/
 sdkconfig
+tests/bbc_cpu/test_6502_functional
