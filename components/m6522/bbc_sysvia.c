@@ -21,6 +21,47 @@
 #endif
 
 /* -------------------------------------------------------------------------
+ * Internal: update CA2 ("any key pressed" signal) on System VIA.
+ *
+ * B-em key_update() logic:
+ *   If IC32 bit 3 (KBD_WE) is HIGH (autoscan): CA2=1 if ANY key (rows 1-7,
+ *   any col) is pressed.
+ *   If IC32 bit 3 is LOW (specific-scan): CA2=1 if any key in the current
+ *   column (from PA bits 3:0) is pressed (rows 1-7).
+ *
+ * CA2 drives an interrupt that wakes the MOS keyboard scanner.
+ * Without CA2, the MOS never knows a key was pressed.
+ * ------------------------------------------------------------------------- */
+#define BBC_KB_ROWS_MAX  8
+#define BBC_KB_COLS_MAX 10
+
+static void sysvia_update_ca2(bbc_sysvia_t *sv)
+{
+    if (!sv->cb.keyboard_read) return;
+
+    bool any = false;
+    uint8_t col = sv->via.pa.outr & 0x0F;
+    bool autoscan = !!(sv->latch & (1u << BBC_LATCH_KB_AUTOSCAN));
+
+    if (autoscan) {
+        /* Scan all columns, rows 1-7 */
+        for (uint8_t c = 0; c < BBC_KB_COLS_MAX && !any; c++)
+            for (uint8_t r = 1; r < BBC_KB_ROWS_MAX && !any; r++)
+                if (sv->cb.keyboard_read(sv->cb.user_ctx, r, c))
+                    any = true;
+    } else {
+        /* Scan all rows in the currently selected column */
+        if (col < BBC_KB_COLS_MAX)
+            for (uint8_t r = 1; r < BBC_KB_ROWS_MAX && !any; r++)
+                if (sv->cb.keyboard_read(sv->cb.user_ctx, r, col))
+                    any = true;
+    }
+
+    /* CA2 goes HIGH when a key is detected, LOW when none */
+    m6522_set_ca2(&sv->via, any);
+}
+
+/* -------------------------------------------------------------------------
  * Internal: update addressable latch IC32 from Port B output
  *
  * Port B bits 0-2 select which latch bit to drive.
@@ -84,6 +125,8 @@ static void sysvia_port_out(void *user_ctx, uint8_t port, uint8_t val, uint8_t d
         uint8_t old_latch = sv->latch;
         sysvia_update_latch(sv, val);
         sysvia_check_sound(sv, old_latch);
+        /* IC32 change may affect keyboard autoscan → update CA2 */
+        sysvia_update_ca2(sv);
     } else {
         /* Port A (slow data bus) — keyboard row/col select + SN76489 data.
          * MOS writes (row<<4)|col to Port A to select a keyboard position.
@@ -93,6 +136,8 @@ static void sysvia_port_out(void *user_ctx, uint8_t port, uint8_t val, uint8_t d
             if (sv->cb.sound_write)
                 sv->cb.sound_write(sv->cb.user_ctx, val);
         }
+        /* Port A change (new row/col) → update CA2 */
+        sysvia_update_ca2(sv);
     }
 }
 
@@ -219,4 +264,10 @@ void bbc_sysvia_set_joystick(bbc_sysvia_t *sv, bool fire0, bool fire1)
 uint8_t bbc_sysvia_get_latch(const bbc_sysvia_t *sv)
 {
     return sv->latch;
+}
+
+void bbc_sysvia_keyboard_updated(bbc_sysvia_t *sv)
+{
+    /* Recalculate CA2 immediately when keyboard state changes */
+    sysvia_update_ca2(sv);
 }

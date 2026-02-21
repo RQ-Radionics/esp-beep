@@ -30,6 +30,8 @@
 #  include <stdio.h>
 #  define VIA_LOGD(fmt, ...) /* no-op */
 #  define VIA_LOGW(fmt, ...) fprintf(stderr, "m6522 WARN: " fmt "\n", ##__VA_ARGS__)
+/* Uncomment to enable ORA read tracing for keyboard debug */
+/* #define VIA_TRACE_ORA */
 #endif
 
 /* --------------------------------------------------------------------------
@@ -255,6 +257,10 @@ static uint8_t reg_read(m6522_t *via, uint8_t addr)
             clear_pa_intr(via);
             if (M6522_PCR_CA2_AUTO_HS(via) || M6522_PCR_CA2_PULSE_OUTPUT(via))
                 via->pa.c2_out = false;
+#ifdef VIA_TRACE_ORA
+            fprintf(stderr, "[ORA_read] outr=%02X ddr=%02X inpr=%02X data=%02X IFR=%02X IER=%02X\n",
+                    via->pa.outr, via->pa.ddr, via->pa.inpr, data, via->ifr, via->ier);
+#endif
             VIA_LOGD("read ORA -> %02X", data);
             break;
 
@@ -323,6 +329,10 @@ static uint8_t reg_read(m6522_t *via, uint8_t addr)
                 data = port_pins(&via->pa);
             }
             /* NOTE: no handshake clear */
+#ifdef VIA_TRACE_ORA
+            fprintf(stderr, "[ORA_NH_read] outr=%02X ddr=%02X inpr=%02X data=%02X IFR=%02X IER=%02X\n",
+                    via->pa.outr, via->pa.ddr, via->pa.inpr, data, via->ifr, via->ier);
+#endif
             break;
     }
     return data;

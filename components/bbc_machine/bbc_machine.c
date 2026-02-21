@@ -223,6 +223,9 @@ void bbc_machine_mount_disk(bbc_machine_t *m, uint8_t drive,
 void bbc_machine_key_event(bbc_machine_t *m, uint8_t row, uint8_t col, bool pressed) {
     if (row < BBC_KB_ROWS && col < BBC_KB_COLS) {
         m->keyboard.pressed[row][col] = pressed;
+        /* Notify sysvia immediately so CA2 ("any key") is updated.
+         * Without this, the MOS keyboard scanner never wakes up. */
+        bbc_sysvia_keyboard_updated(&m->sysvia);
     }
 }
 

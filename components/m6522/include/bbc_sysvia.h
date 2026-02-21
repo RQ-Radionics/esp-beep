@@ -108,6 +108,13 @@ void    bbc_sysvia_set_joystick(bbc_sysvia_t *sv, bool fire0, bool fire1);
 /* Read current IC32 latch state */
 uint8_t bbc_sysvia_get_latch(const bbc_sysvia_t *sv);
 
+/*
+ * Notify sysvia that keyboard state has changed (key pressed/released).
+ * Call this from the host whenever a key event occurs so that CA2 is
+ * updated immediately, allowing the MOS keyboard scanner to wake up.
+ */
+void    bbc_sysvia_keyboard_updated(bbc_sysvia_t *sv);
+
 #ifdef __cplusplus
 }
 #endif

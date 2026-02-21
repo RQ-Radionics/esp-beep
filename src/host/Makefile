@@ -38,13 +38,36 @@ SRCS    := main_sdl.c \
            $(ROOT)/ext/vrEmu6502/src/vrEmu6502.c
 
 TARGET  := bbc-beep
+DIAG    := diag_kbd
 
-.PHONY: all clean
+COMP_SRCS := $(COMP)/bbc_machine/bbc_machine.c \
+             $(COMP)/bbc_memory/bbc_memory.c \
+             $(COMP)/bbc_cpu/bbc_cpu.c \
+             $(COMP)/bbc_video/bbc_video.c \
+             $(COMP)/bbc_video/bbc_video_ula.c \
+             $(COMP)/bbc_video/mc6845.c \
+             $(COMP)/bbc_video/saa5050.c \
+             $(COMP)/bbc_video/saa5050_font.c \
+             $(COMP)/m6522/m6522.c \
+             $(COMP)/m6522/bbc_sysvia.c \
+             $(COMP)/m6522/bbc_uservia.c \
+             $(COMP)/wd1770/wd1770.c \
+             $(COMP)/sn76489/sn76489.c \
+             $(ROOT)/ext/vrEmu6502/src/vrEmu6502.c
+
+SRCS    := main_sdl.c $(COMP_SRCS)
+
+.PHONY: all clean diag
 
 all: $(TARGET)
 
 $(TARGET): $(SRCS)
 	$(CC) $(CFLAGS) $(INCS) $^ $(LDFLAGS) -o $@
 
+diag: $(DIAG)
+
+$(DIAG): diag_kbd.c $(COMP_SRCS)
+	$(CC) $(CFLAGS) $(INCS) -I$(COMP)/bbc_memory -DVIA_TRACE_ORA $^ -o $@
+
 clean:
-	rm -f $(TARGET)
+	rm -f $(TARGET) $(DIAG)
