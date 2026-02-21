@@ -38,17 +38,19 @@
 #define FPS_TARGET   50           /* BBC runs at 50 Hz (PAL)                 */
 
 /* -------------------------------------------------------------------------
- * BBC colour palette  index → RGBA8888
- * bit0=R, bit1=G, bit2=B  (VideoULA convention)
+ * BBC colour palette  index → SDL RGBA8888
+ * SDL_PIXELFORMAT_RGBA8888: Rmask=FF000000 Gmask=00FF0000 Bmask=0000FF00 Amask=000000FF
+ * BBC bit0=R, bit1=G, bit2=B  (VideoULA convention)
+ * Format: 0xRRGGBBAA
  * ------------------------------------------------------------------------- */
 static const uint32_t s_palette[8] = {
-    0xFF000000,   /* 0 Black   */
+    0x000000FF,   /* 0 Black   */
     0xFF0000FF,   /* 1 Red     */
-    0xFF00FF00,   /* 2 Green   */
-    0xFF00FFFF,   /* 3 Yellow  */
-    0xFFFF0000,   /* 4 Blue    */
-    0xFFFF00FF,   /* 5 Magenta */
-    0xFFFFFF00,   /* 6 Cyan    */
+    0x00FF00FF,   /* 2 Green   */
+    0xFFFF00FF,   /* 3 Yellow  */
+    0x0000FFFF,   /* 4 Blue    */
+    0xFF00FFFF,   /* 5 Magenta */
+    0x00FFFFFF,   /* 6 Cyan    */
     0xFFFFFFFF,   /* 7 White   */
 };
 
@@ -343,6 +345,10 @@ int main(int argc, char *argv[])
         WIN_W, WIN_H, SDL_WINDOW_SHOWN | SDL_WINDOW_RESIZABLE);
     if (!win) { fprintf(stderr, "SDL_CreateWindow: %s\n", SDL_GetError()); return 1; }
 
+    /* macOS: raise window and request keyboard focus explicitly.
+     * Without this, a terminal-launched SDL app may not receive key events. */
+    SDL_RaiseWindow(win);
+
     SDL_Renderer *ren = SDL_CreateRenderer(
         win, -1, SDL_RENDERER_ACCELERATED | SDL_RENDERER_PRESENTVSYNC);
     if (!ren) {
@@ -397,6 +403,8 @@ int main(int argc, char *argv[])
             if (ev.type == SDL_QUIT) {
                 s_running = false;
             } else if (ev.type == SDL_KEYDOWN || ev.type == SDL_KEYUP) {
+                /* Ignore key-repeat events — BBC handles repetition itself */
+                if (ev.key.repeat) continue;
                 /* Ctrl+Q = quit */
                 if (ev.type == SDL_KEYDOWN &&
                     ev.key.keysym.scancode == SDL_SCANCODE_Q &&
