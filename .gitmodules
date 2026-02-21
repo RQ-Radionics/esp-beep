@@ -1,0 +1,3 @@
+[submodule "components/vrEmu6502"]
+	path = components/vrEmu6502
+	url = git@github.com:rampa069/vrEmu6502.git
