@@ -5,11 +5,12 @@
  * Pin assignments: see board.h
  *
  * Display: FabGL VGADirectController (64-colour, 8 GPIOs)
- *   - No persistent viewport — only 2 DMA scan-line buffers allocated by FabGL.
- *   - A 320×256 index-8 back-buffer (one byte per pixel, BBC colour 0-7)
- *     is allocated in PSRAM.
- *   - draw_scanline doubles pixels horizontally (320→640) and vertically
- *     (256→512, centred in 480 VGA lines).
+ *   - No persistent framebuffer — pixels are rendered directly into FabGL's
+ *     DMA scan-line buffer on demand by the draw_scanline ISR (Core 1).
+ *   - draw_scanline calls bbc_video_render_row() for each VGA scanline,
+ *     mapping VGA line 0-479 → BBC row 0-255 (nearest-neighbour, 256→480).
+ *   - A 640-byte DRAM row buffer (s_row_buf) is the only render scratch space.
+ *   - Saves ~320 KB PSRAM vs. the previous double-framebuffer approach.
  *
  * Keyboard: FabGL PS2Controller → BBC Micro keyboard matrix
  *   - PS/2 on GPIO 33 (CLK) / 32 (DATA) per board.h
@@ -54,14 +55,12 @@ static const char *TAG_MAIN = "main";
 static const char *TAG_SD   = "sd";
 
 /* -----------------------------------------------------------------------
- * Back-buffer dimensions
+ * VGA / BBC output width
  * ----------------------------------------------------------------------- */
-/* Back-buffer matches VGA width exactly (640 pixels).
- * bbc_video renders directly at 640×256 — no horizontal doubling needed
- * in draw_scanline.  Teletext (Mode 7) needs 40 cols × 12px = 480 ≤ 640;
- * bitmap modes need up to 640px at 2MHz clock — both fit. */
-#define BBC_BUF_W   640
-#define BBC_BUF_H   256
+/* BBC content renders at 640 pixels wide (1:1 with VGA 640×480).
+ * Teletext (Mode 7): 40 cols × 12 px = 480 px, centred with 80 px border.
+ * Bitmap modes: up to 640 px at 2 MHz clock — fits exactly. */
+#define BBC_BUF_W   640     /* pixels per VGA line / BBC row */
 
 /* -----------------------------------------------------------------------
  * BBC colour palette (index 0-7 → RGB888)
@@ -372,16 +371,39 @@ static bool sd_init_and_mount_disk(bbc_machine_t *m)
 static fabgl::VGADirectController s_vga;
 static fabgl::PS2Controller       s_ps2;
 
-/* Double-buffered back-buffers in PSRAM (BBC_BUF_H × BBC_BUF_W, 1B/px).
+/* Per-scanline render scratch buffer in DRAM (not PSRAM — ISR must access
+ * it at wire speed without PSRAM latency).  640 bytes = one VGA line. */
+static uint8_t s_row_buf[BBC_BUF_W];
+
+/* Per-frame video state snapshot taken at VGA VSYNC (scanLine == 0).
  *
- * s_draw_idx: index of the buffer currently being READ by draw_scanline ISR.
- *   The emulator always writes to s_buf[1 - s_draw_idx].
- *   After a complete frame is rendered, the emulator atomically flips
- *   s_draw_idx so the ISR picks up the new frame on the next VGA field.
- *   No mutex needed: the flip is a single 32-bit store (atomic on Xtensa).
+ * The ISR (Core 1) and the emulator (Core 0) share bbc_machine_t in PSRAM.
+ * Without a snapshot, CRTC/ULA registers written by Core 0 mid-frame would
+ * cause pixel tearing or mode-switch glitches within a single VGA field.
+ *
+ * At the start of each VGA frame (scanLine == 0) the ISR copies the relevant
+ * video sub-state from machine->video into s_video_snap.  All 480 scanline
+ * calls within that frame then render from the snapshot — a consistent,
+ * immutable view of the BBC video state for the duration of one VGA field.
+ *
+ * system_ram is NOT copied (up to 32 KB); the pointer is kept.  RAM writes
+ * from Core 0 may still cause pixel-level tearing within a frame, but this
+ * is visually acceptable and avoids a costly memcpy in the ISR.
+ *
+ * The snapshot contains: mc6845_t registers, bbc_video_ula_t state, and the
+ * saa5050_t state (DH propagation table).  Total: ~sizeof(bbc_video_t) minus
+ * the callbacks and frame counter, dominated by the SAA5050 char ROM pointer.
+ *
+ * Layout in DRAM: two ping-pong slots so Core 0 can write the next snapshot
+ * while Core 1 finishes reading the current one.  s_snap_idx selects the
+ * active slot for the ISR; Core 0 writes to 1 - s_snap_idx then flips.
+ *
+ * For simplicity we use a single slot with a volatile flag.  Worst case:
+ * Core 0 writes the snapshot just as Core 1 reads it for scanLine 0 of the
+ * next frame.  This race affects at most one frame per second at BBC speed.
  */
-static uint8_t *s_buf[2]       = { nullptr, nullptr };
-static volatile uint32_t s_draw_idx = 0;   /* ISR reads s_buf[s_draw_idx] */
+static bbc_video_t s_video_snap;           /* snapshot read by ISR          */
+static volatile bool s_snap_ready = false; /* true once first snap is taken */
 
 /* Pre-computed 8bpp VGA signal bytes for each BBC colour index. */
 static uint8_t s_sig[8];
@@ -392,47 +414,50 @@ static bbc_machine_t *machine = nullptr;
 /* -----------------------------------------------------------------------
  * VGADirectController draw-scanline callback (IRAM, Core 1 ISR context)
  * ----------------------------------------------------------------------- */
-/* VGA is 640×480.  BBC back-buffer is 640×256 (1:1 horizontally).
- * Vertical mapping: 256 BBC rows → 480 VGA lines.
- *   BBC row = scanLine * 256 / 480  (nearest-neighbour scaling)
- * No horizontal doubling needed — bbc_video renders at full 640px width.
+/* VGA is 640×480.  BBC native output is 640×256 (1:1 horizontally).
+ * Vertical mapping: 256 BBC rows → 480 VGA lines (nearest-neighbour ×1.875).
  *
- * Mode 7 (Teletext): render_teletext_frame() centres content horizontally.
- *   40 cols × 12 px = 480 px content, x_offset = (640-480)/2 = 80 px.
- *   x_offset must be a multiple of 4 so the I2S swizzle lands on aligned
- *   word boundaries — 80 is divisible by 4, so no sub-word pixel reorder.
+ * At scanLine == 0 (VSYNC / start of VGA frame): snapshot CRTC + ULA + SAA5050
+ * state from machine->video into s_video_snap.  All scanlines in this frame
+ * render from the snapshot for a consistent, tear-free image within one field.
  *
- * I2S LCD mode serialises 32-bit words as [byte2, byte3, byte0, byte1].
- * Writing dest[x ^ 2] compensates: the hardware re-orders back to [0,1,2,3]
- * at the output pins.  x_offset being a multiple of 4 keeps groups aligned.
+ * system_ram is shared (not snapshotted) to avoid a 32 KB ISR memcpy; RAM
+ * writes by Core 0 may cause sub-frame pixel tearing but not corruption.
+ *
+ * I2S LCD serialises 32-bit words as [byte2, byte3, byte0, byte1].
+ * Writing dest[x ^ 2] compensates so the output pin order is [0,1,2,3].
+ * x_offset=80 (teletext border) is a multiple of 4 — word-aligned.
  */
 static void IRAM_ATTR draw_scanline(void * /*arg*/, uint8_t *dest, int scanLine)
 {
-    /* Read the buffer that the emulator last completed (not the one being
-     * written now).  s_draw_idx is flipped by on_frame_ready() after each
-     * complete frame — a single 32-bit store, atomic on Xtensa. */
-    const uint8_t *fb = s_buf[s_draw_idx];
-    if (!fb) {
-        memset(dest, s_sig[0], 640);
+    if (!machine) {
+        memset(dest, s_sig[0], BBC_BUF_W);
         return;
     }
 
-    /* Scale 480 VGA lines → 256 BBC rows (nearest-neighbour) */
-    int bbc_row = scanLine * BBC_BUF_H / 480;
-    if (bbc_row >= BBC_BUF_H) bbc_row = BBC_BUF_H - 1;
-
-    const uint8_t *src = fb + bbc_row * BBC_BUF_W;
-    for (int x = 0; x < 640; x++) {
-        dest[x ^ 2] = s_sig[src[x] & 7];
+    /* At the start of each VGA frame, snapshot video registers from PSRAM.
+     * This is the only point where we touch machine->video (in PSRAM);
+     * all subsequent scanline calls use s_video_snap (DRAM). */
+    if (scanLine == 0) {
+        /* Copy CRTC, ULA, SAA5050 state; keep system_ram pointer from snap. */
+        s_video_snap            = machine->video;
+        /* Clear mutable render-only fields that the snapshot must not carry */
+        s_video_snap.frame_cb   = nullptr;
+        s_video_snap.vsync_cb   = nullptr;
+        s_video_snap.frame_ctx  = nullptr;
+        s_video_snap.vsync_ctx  = nullptr;
+        s_snap_ready            = true;
     }
-}
 
-/* Called by bbc_video after each complete frame is rendered into the
- * write buffer.  Flip s_draw_idx so the ISR picks up the new frame.
- * This is a single 32-bit store — atomic on Xtensa without a mutex. */
-static void on_frame_ready(void * /*ctx*/)
-{
-    s_draw_idx ^= 1u;
+    if (!s_snap_ready) {
+        memset(dest, s_sig[0], BBC_BUF_W);
+        return;
+    }
+
+    bbc_video_render_row(&s_video_snap, scanLine, 480, s_row_buf, BBC_BUF_W);
+
+    for (int x = 0; x < BBC_BUF_W; x++)
+        dest[x ^ 2] = s_sig[s_row_buf[x] & 7];
 }
 
 /* -----------------------------------------------------------------------
@@ -495,19 +520,14 @@ static void emulatorTask(void *arg)
 {
     (void)arg;
 
-    /* Emulator always writes to the buffer NOT being read by the ISR.
-     * s_draw_idx starts at 0 → ISR reads s_buf[0] → we write s_buf[1].
-     * on_frame_ready() flips s_draw_idx after each complete frame. */
-    bbc_video_output_t fb_out = {};
-    fb_out.format      = BBC_FB_FORMAT_INDEX8;
-    fb_out.width       = BBC_BUF_W;
-    fb_out.height      = BBC_BUF_H;
-    fb_out.framebuffer = s_buf[1];   /* write buffer = 1 - s_draw_idx(=0) */
-    fb_out.fb_stride   = BBC_BUF_W;
-
-    bbc_machine_set_video_output(machine, &fb_out);
-    bbc_machine_set_frame_callback(machine, on_frame_ready, nullptr);
-
+    /* No framebuffer needed — draw_scanline renders directly via
+     * bbc_video_render_row().  The emulator just runs BBC CPU cycles and
+     * updates machine state; the VGA ISR (Core 1) reads that state on demand.
+     *
+     * Timing: BBC 6502 runs at ~2 MHz; FreeRTOS tick at 1000 Hz (1 ms).
+     * Target: 2 000 000 / 1000 = 2000 cycles per tick.
+     * bbc_machine_step() returns the cycle count of each instruction (2-7).
+     * We run a budget of 2000 cycles per vTaskDelay(1) tick. */
     bbc_machine_reset(machine);
     printf("[emu] BBC Micro reset, running...\n");
 
@@ -518,12 +538,6 @@ static void emulatorTask(void *arg)
             int c = bbc_machine_step(machine);
             cycles_budget -= c;
         }
-        /* Render into the write buffer (1 - s_draw_idx), then flip. */
-        uint32_t write_idx = 1u - s_draw_idx;
-        fb_out.framebuffer = s_buf[write_idx];
-        bbc_machine_set_video_output(machine, &fb_out);
-        bbc_video_render_frame(&machine->video);
-        /* on_frame_ready() flips s_draw_idx after render completes */
         vTaskDelay(1);
     }
 }
@@ -542,19 +556,6 @@ extern "C" void app_main(void)
                 BOARD_VGA_G1,    BOARD_VGA_G0,
                 BOARD_VGA_B1,    BOARD_VGA_B0,
                 BOARD_VGA_HSYNC, BOARD_VGA_VSYNC);
-
-    /* --- Double back-buffers in PSRAM ------------------------------------ */
-    for (int i = 0; i < 2; i++) {
-        s_buf[i] = (uint8_t *)heap_caps_malloc(
-            BBC_BUF_H * BBC_BUF_W, MALLOC_CAP_SPIRAM);
-        if (!s_buf[i]) {
-            printf("[main] back-buffer[%d] alloc failed — need PSRAM\n", i);
-            return;
-        }
-        memset(s_buf[i], 0, BBC_BUF_H * BBC_BUF_W);
-    }
-    /* ISR starts reading s_buf[0]; emulator starts writing s_buf[1]. */
-    s_draw_idx = 0;
 
     s_vga.setDrawScanlineCallback(draw_scanline, nullptr);
 

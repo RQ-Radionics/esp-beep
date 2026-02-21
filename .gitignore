@@ -54,8 +54,7 @@ dkms.conf
 # debug information files
 *.dwo
 
-# PlatformIO
-.pio
+# Editor
 .vscode
 
 # ESP-IDF
