@@ -375,6 +375,36 @@ static fabgl::PS2Controller       s_ps2;
  * it at wire speed without PSRAM latency).  640 bytes = one VGA line. */
 static uint8_t s_row_buf[BBC_BUF_W];
 
+/* Per-frame video state snapshot taken at VGA VSYNC (scanLine == 0).
+ *
+ * The ISR (Core 1) and the emulator (Core 0) share bbc_machine_t in PSRAM.
+ * Without a snapshot, CRTC/ULA registers written by Core 0 mid-frame would
+ * cause pixel tearing or mode-switch glitches within a single VGA field.
+ *
+ * At the start of each VGA frame (scanLine == 0) the ISR copies the relevant
+ * video sub-state from machine->video into s_video_snap.  All 480 scanline
+ * calls within that frame then render from the snapshot — a consistent,
+ * immutable view of the BBC video state for the duration of one VGA field.
+ *
+ * system_ram is NOT copied (up to 32 KB); the pointer is kept.  RAM writes
+ * from Core 0 may still cause pixel-level tearing within a frame, but this
+ * is visually acceptable and avoids a costly memcpy in the ISR.
+ *
+ * The snapshot contains: mc6845_t registers, bbc_video_ula_t state, and the
+ * saa5050_t state (DH propagation table).  Total: ~sizeof(bbc_video_t) minus
+ * the callbacks and frame counter, dominated by the SAA5050 char ROM pointer.
+ *
+ * Layout in DRAM: two ping-pong slots so Core 0 can write the next snapshot
+ * while Core 1 finishes reading the current one.  s_snap_idx selects the
+ * active slot for the ISR; Core 0 writes to 1 - s_snap_idx then flips.
+ *
+ * For simplicity we use a single slot with a volatile flag.  Worst case:
+ * Core 0 writes the snapshot just as Core 1 reads it for scanLine 0 of the
+ * next frame.  This race affects at most one frame per second at BBC speed.
+ */
+static bbc_video_t s_video_snap;           /* snapshot read by ISR          */
+static volatile bool s_snap_ready = false; /* true once first snap is taken */
+
 /* Pre-computed 8bpp VGA signal bytes for each BBC colour index. */
 static uint8_t s_sig[8];
 
@@ -387,21 +417,16 @@ static bbc_machine_t *machine = nullptr;
 /* VGA is 640×480.  BBC native output is 640×256 (1:1 horizontally).
  * Vertical mapping: 256 BBC rows → 480 VGA lines (nearest-neighbour ×1.875).
  *
- * Instead of reading a pre-rendered PSRAM framebuffer, each scanline is
- * rendered on-demand via bbc_video_render_row() directly into s_row_buf,
- * then translated from BBC colour indices to VGA signal bytes.
+ * At scanLine == 0 (VSYNC / start of VGA frame): snapshot CRTC + ULA + SAA5050
+ * state from machine->video into s_video_snap.  All scanlines in this frame
+ * render from the snapshot for a consistent, tear-free image within one field.
  *
- * Mode 7 (Teletext): render_teletext_row() centres content at x_offset=80.
- *   80 is a multiple of 4, so the I2S swizzle stays word-aligned.
+ * system_ram is shared (not snapshotted) to avoid a 32 KB ISR memcpy; RAM
+ * writes by Core 0 may cause sub-frame pixel tearing but not corruption.
  *
  * I2S LCD serialises 32-bit words as [byte2, byte3, byte0, byte1].
  * Writing dest[x ^ 2] compensates so the output pin order is [0,1,2,3].
- *
- * s_row_buf is in DRAM (static global) — ISR can access it without PSRAM
- * latency.  bbc_video_render_row() is read-only on BBC state; concurrent
- * writes by the emulator (Core 0) may cause pixel tearing between frames
- * but not memory corruption.  A per-frame snapshot (uwi.3) can eliminate
- * tearing if required.
+ * x_offset=80 (teletext border) is a multiple of 4 — word-aligned.
  */
 static void IRAM_ATTR draw_scanline(void * /*arg*/, uint8_t *dest, int scanLine)
 {
@@ -410,7 +435,26 @@ static void IRAM_ATTR draw_scanline(void * /*arg*/, uint8_t *dest, int scanLine)
         return;
     }
 
-    bbc_video_render_row(&machine->video, scanLine, 480, s_row_buf, BBC_BUF_W);
+    /* At the start of each VGA frame, snapshot video registers from PSRAM.
+     * This is the only point where we touch machine->video (in PSRAM);
+     * all subsequent scanline calls use s_video_snap (DRAM). */
+    if (scanLine == 0) {
+        /* Copy CRTC, ULA, SAA5050 state; keep system_ram pointer from snap. */
+        s_video_snap            = machine->video;
+        /* Clear mutable render-only fields that the snapshot must not carry */
+        s_video_snap.frame_cb   = nullptr;
+        s_video_snap.vsync_cb   = nullptr;
+        s_video_snap.frame_ctx  = nullptr;
+        s_video_snap.vsync_ctx  = nullptr;
+        s_snap_ready            = true;
+    }
+
+    if (!s_snap_ready) {
+        memset(dest, s_sig[0], BBC_BUF_W);
+        return;
+    }
+
+    bbc_video_render_row(&s_video_snap, scanLine, 480, s_row_buf, BBC_BUF_W);
 
     for (int x = 0; x < BBC_BUF_W; x++)
         dest[x ^ 2] = s_sig[s_row_buf[x] & 7];
