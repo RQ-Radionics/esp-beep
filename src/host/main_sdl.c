@@ -59,15 +59,34 @@ static const uint32_t s_palette[8] = {
  * ------------------------------------------------------------------------- */
 #define BBC_SECTORS_PER_TRACK  10
 #define BBC_SECTOR_SIZE        256
-#define BBC_TRACKS             80
+#define BBC_TRACKS_MAX         80   /* maximum supported tracks */
 
 typedef struct {
-    FILE   *fp;
-    bool    is_dsd;
-    bool    read_only;
+    FILE    *fp;
+    bool     is_dsd;
+    bool     read_only;
+    uint8_t  n_tracks;   /* actual track count read from DFS catalogue */
 } disk_ctx_t;
 
 static disk_ctx_t s_disk;
+
+/* Read the total-sector count from the DFS catalogue in sector 1 ($100-$1FF)
+ * and derive n_tracks.  Falls back to BBC_TRACKS_MAX on any error. */
+static uint8_t disk_detect_tracks(FILE *fp, bool is_dsd)
+{
+    (void)is_dsd;
+    uint8_t s1[256];
+    if (fseek(fp, 256, SEEK_SET) != 0) return BBC_TRACKS_MAX;
+    if (fread(s1, 1, 256, fp) != 256)  return BBC_TRACKS_MAX;
+    /* DFS catalogue sector 1:
+     *   byte $06 bits 1:0 = total sectors high 2 bits
+     *   byte $07           = total sectors low 8 bits  */
+    uint16_t total_sectors = ((uint16_t)(s1[6] & 0x03) << 8) | s1[7];
+    if (total_sectors == 0) return BBC_TRACKS_MAX;
+    uint8_t tracks = (uint8_t)(total_sectors / BBC_SECTORS_PER_TRACK);
+    if (tracks == 0 || tracks > BBC_TRACKS_MAX) return BBC_TRACKS_MAX;
+    return tracks;
+}
 
 static int disk_read(void *ctx,
                      uint8_t _drive, uint8_t track, uint8_t sector,
@@ -77,7 +96,7 @@ static int disk_read(void *ctx,
     (void)_drive; (void)_density;
     disk_ctx_t *d = (disk_ctx_t *)ctx;
     if (!d || !d->fp) return -1;
-    if (track >= BBC_TRACKS || sector >= BBC_SECTORS_PER_TRACK) return -1;
+    if (track >= d->n_tracks || sector >= BBC_SECTORS_PER_TRACK) return -1;
     if (!d->is_dsd && side != 0) return -1;
 
     long off = d->is_dsd
@@ -98,7 +117,7 @@ static int disk_write(void *ctx,
     (void)_drive; (void)_density; (void)_deleted;
     disk_ctx_t *d = (disk_ctx_t *)ctx;
     if (!d || !d->fp || d->read_only) return -1;
-    if (track >= BBC_TRACKS || sector >= BBC_SECTORS_PER_TRACK) return -1;
+    if (track >= d->n_tracks || sector >= BBC_SECTORS_PER_TRACK) return -1;
     if (!d->is_dsd && side != 0) return -1;
     if (len != BBC_SECTOR_SIZE) return -1;
 
@@ -201,7 +220,13 @@ static BbcKey sdl_to_bbc(SDL_Scancode sc)
     case SDL_SCANCODE_Y:         return (BbcKey){4, 4};
     case SDL_SCANCODE_J:         return (BbcKey){4, 5};
     case SDL_SCANCODE_K:         return (BbcKey){4, 6};
-    case SDL_SCANCODE_APOSTROPHE:return (BbcKey){4, 7};  /* @ */
+    /* US keyboard layout:
+     *   '  (apostrophe) → BBC :* (row4 col8).  Shift+' = * on BBC.
+     *   `  (grave)      → BBC @  (row4 col7).
+     *   ;  (semicolon)  → BBC ;+ (row5 col7) — already below.
+     * The BBC @ key has no direct US equivalent; grave is the closest spare. */
+    case SDL_SCANCODE_APOSTROPHE:return (BbcKey){4, 8};  /* : / * */
+    case SDL_SCANCODE_GRAVE:     return (BbcKey){4, 7};  /* @ */
     case SDL_SCANCODE_RETURN:
     case SDL_SCANCODE_KP_ENTER:  return (BbcKey){4, 9};
     /* Row 5 */
@@ -237,11 +262,16 @@ static BbcKey sdl_to_bbc(SDL_Scancode sc)
     case SDL_SCANCODE_F9:        return (BbcKey){7, 7};
     case SDL_SCANCODE_BACKSLASH: return (BbcKey){7, 8};
     case SDL_SCANCODE_RIGHT:     return (BbcKey){7, 9};
-    /* Extra keys */
+    /* Extra keys (US layout)
+     * BBC row1 col8 = ^ / ~   → US = (no direct key; use = as fallback)
+     * BBC row3 col8 = [ / {   → US [
+     * BBC row5 col8 = ] / }   → US ]
+     * BBC row7 col8 = \ / |   → US backslash (already above)
+     * BBC row1 col7 = - / =   → US -  (already above)
+     * Note: GRAVE is now used for BBC @ (row4 col7) */
     case SDL_SCANCODE_EQUALS:       return (BbcKey){1, 8};  /* ^ / ~ on BBC */
     case SDL_SCANCODE_LEFTBRACKET:  return (BbcKey){3, 8};  /* [ / { */
     case SDL_SCANCODE_RIGHTBRACKET: return (BbcKey){5, 8};  /* ] / } */
-    case SDL_SCANCODE_GRAVE:        return (BbcKey){1, 8};  /* ~ / ^ */
     default:                     return (BbcKey){-1, -1};
     }
 }
@@ -345,9 +375,11 @@ int main(int argc, char *argv[])
             s_disk.read_only = true;
         }
         if (s_disk.fp) {
-            printf("[disk] %s (%s, %s)\n", img,
+            s_disk.n_tracks = disk_detect_tracks(s_disk.fp, is_dsd);
+            printf("[disk] %s (%s, %s, %u tracks)\n", img,
                    is_dsd ? "DSD" : "SSD",
-                   s_disk.read_only ? "read-only" : "read-write");
+                   s_disk.read_only ? "read-only" : "read-write",
+                   s_disk.n_tracks);
             bbc_machine_mount_disk(s_machine, 0,
                                    disk_read, disk_write, disk_seek,
                                    &s_disk);
@@ -446,10 +478,17 @@ int main(int argc, char *argv[])
                     continue;
                 }
                 BbcKey k = sdl_to_bbc(ev.key.keysym.scancode);
-                if (k.row >= 0)
+                if (k.row >= 0) {
                     bbc_machine_key_event(s_machine,
                                          (uint8_t)k.row, (uint8_t)k.col,
                                          ev.type == SDL_KEYDOWN);
+                } else if (ev.type == SDL_KEYDOWN) {
+                    /* Unmapped key: print scancode to help diagnose layout */
+                    printf("[key] unmapped scancode=%d sym=%d name=%s\n",
+                           (int)ev.key.keysym.scancode,
+                           (int)ev.key.keysym.sym,
+                           SDL_GetKeyName(ev.key.keysym.sym));
+                }
             }
         }
 
