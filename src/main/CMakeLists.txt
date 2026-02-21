@@ -6,4 +6,5 @@ idf_component_register(
     EMBED_FILES
         ${CMAKE_SOURCE_DIR}/rom/os12.rom
         ${CMAKE_SOURCE_DIR}/rom/basic2.rom
+        ${CMAKE_SOURCE_DIR}/rom/dfs1770.rom
 )

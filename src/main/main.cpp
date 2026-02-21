@@ -600,14 +600,19 @@ extern "C" void app_main(void)
         return;
     }
 
-    uint32_t os_size    = (uint32_t)(os12_rom_end   - os12_rom);
-    uint32_t basic_size = (uint32_t)(basic2_rom_end - basic2_rom);
-    printf("[main] OS ROM: %lu B  BASIC ROM: %lu B\n",
-           (unsigned long)os_size, (unsigned long)basic_size);
+    uint32_t os_size    = (uint32_t)(os12_rom_end    - os12_rom);
+    uint32_t basic_size = (uint32_t)(basic2_rom_end  - basic2_rom);
+    uint32_t dfs_size   = (uint32_t)(dfs1770_rom_end - dfs1770_rom);
+    printf("[main] OS ROM: %lu B  BASIC ROM: %lu B  DFS ROM: %lu B\n",
+           (unsigned long)os_size, (unsigned long)basic_size,
+           (unsigned long)dfs_size);
 
     bbc_machine_init(machine,
                      os12_rom,   os_size,
                      basic2_rom, basic_size);
+
+    /* Load DFS 1770 ROM into sideways slot 14 (slot 15 = BASIC, 14 = DFS) */
+    bbc_machine_load_sideways_rom(machine, dfs1770_rom, dfs_size, 14);
 
     /* --- SD card + disk image ------------------------------------------- */
     memset(s_disk, 0, sizeof(s_disk));

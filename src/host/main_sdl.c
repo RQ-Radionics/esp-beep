@@ -301,26 +301,33 @@ int main(int argc, char *argv[])
 {
     /* --- ROMs --------------------------------------------------------------- */
     /* Look for ROMs relative to the executable's location, then repo root */
-    char os_path[512], basic_path[512];
+    char os_path[512], basic_path[512], dfs_path[512];
     snprintf(os_path,    sizeof(os_path),    "../../rom/os12.rom");
     snprintf(basic_path, sizeof(basic_path), "../../rom/basic2.rom");
+    snprintf(dfs_path,   sizeof(dfs_path),   "../../rom/dfs1770.rom");
 
-    uint32_t os_size = 0, basic_size = 0;
+    uint32_t os_size = 0, basic_size = 0, dfs_size = 0;
     uint8_t *os_rom    = load_rom(os_path,    &os_size);
     uint8_t *basic_rom = load_rom(basic_path, &basic_size);
+    uint8_t *dfs_rom   = load_rom(dfs_path,   &dfs_size);
     if (!os_rom || !basic_rom) {
         fprintf(stderr, "Failed to load ROMs from %s and %s\n",
                 os_path, basic_path);
         fprintf(stderr, "Run from src/host/ or pass correct paths.\n");
         return 1;
     }
-    printf("[rom] OS: %u B  BASIC: %u B\n", os_size, basic_size);
+    printf("[rom] OS: %u B  BASIC: %u B  DFS: %u B\n",
+           os_size, basic_size, dfs_size);
 
     /* --- Machine ------------------------------------------------------------ */
     s_machine = (bbc_machine_t *)calloc(1, sizeof(bbc_machine_t));
     if (!s_machine) { fprintf(stderr, "OOM\n"); return 1; }
 
     bbc_machine_init(s_machine, os_rom, os_size, basic_rom, basic_size);
+
+    /* Load DFS ROM into sideways slot 14 (slot 15 = BASIC, 14 = DFS) */
+    if (dfs_rom && dfs_size)
+        bbc_machine_load_sideways_rom(s_machine, dfs_rom, dfs_size, 14);
 
     /* --- Disk --------------------------------------------------------------- */
     memset(&s_disk, 0, sizeof(s_disk));

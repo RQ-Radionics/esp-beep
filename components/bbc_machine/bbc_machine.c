@@ -41,6 +41,8 @@ static uint8_t  io_uservia_read  (uint16_t addr, void *ctx);
 static void     io_uservia_write (uint16_t addr, uint8_t val, void *ctx);
 static uint8_t  io_fdc_read      (uint16_t addr, void *ctx);
 static void     io_fdc_write     (uint16_t addr, uint8_t val, void *ctx);
+static uint8_t  io_romsel_read   (uint16_t addr, void *ctx);
+static void     io_romsel_write  (uint16_t addr, uint8_t val, void *ctx);
 
 /* ======================================================================
  * IRQ helpers
@@ -143,9 +145,23 @@ void bbc_machine_init(bbc_machine_t *m,
     bbc_memory_set_range_callbacks(m->mem, 0xFE60, 16,
         io_uservia_read, io_uservia_write, m);
 
-    /* WD1770 FDC: &FE80–&FE84 (&FE84 = drive/side/density select) */
+    /* WD1770 FDC: &FE80–&FE84 (&FE84 = drive/side/density select + DRQ latch) */
     bbc_memory_set_range_callbacks(m->mem, 0xFE80, 5,
         io_fdc_read, io_fdc_write, m);
+
+    /* ROMSEL: &FE30 (write selects sideways ROM slot; read returns current slot) */
+    bbc_memory_set_read_callback (m->mem, 0xFE30, io_romsel_read,  m);
+    bbc_memory_set_write_callback(m->mem, 0xFE30, io_romsel_write, m);
+}
+
+/* ======================================================================
+ * bbc_machine_load_sideways_rom
+ * ====================================================================== */
+
+void bbc_machine_load_sideways_rom(bbc_machine_t *m,
+                                    const uint8_t *rom_data, uint32_t rom_size,
+                                    uint8_t slot) {
+    bbc_memory_load_sideways_rom(m->mem, rom_data, rom_size, slot);
 }
 
 /* ======================================================================
@@ -328,10 +344,17 @@ static void fdc_irq(void *ctx, bool state) {
 }
 
 static void fdc_drq(void *ctx, bool state) {
-    /* DRQ on the BBC is wired to User VIA CB1 for some interfaces, but
-     * for the standard Acorn 1770 interface DRQ is handled via a latch
-     * at &FE84.  We leave it as a stub for now. */
-    (void)ctx; (void)state;
+    /*
+     * On the Acorn 1770 FDC board, DRQ is latched in an external flip-flop
+     * and becomes readable at &FE84 bit 7 (active LOW: 0 = DRQ active).
+     * The DFS NMI handler reads &FE84 to decide whether the NMI was caused
+     * by INTRQ (command done) or DRQ (data byte ready):
+     *   &FE84 bit 7 = 0 → DRQ active  → read/write next data byte
+     *   &FE84 bit 7 = 1 → INTRQ only  → command finished
+     * We track DRQ state so io_fdc_read() can return the correct value.
+     */
+    bbc_machine_t *m = (bbc_machine_t *)ctx;
+    m->fdc_drq_state = state;
 }
 
 /* ======================================================================
@@ -407,6 +430,15 @@ static uint8_t io_fdc_read(uint16_t addr, void *ctx) {
     if (reg <= 3) {
         return wd1770_read(&m->fdc, reg);
     }
+    if (reg == 4) {
+        /*
+         * &FE84 read: Acorn 1770 DRQ latch.
+         * bit 7 = 0 → DRQ asserted (data byte ready / wanted)
+         * bit 7 = 1 → no DRQ (INTRQ or idle)
+         * All other bits are undefined / pull-up (0xFF).
+         */
+        return m->fdc_drq_state ? 0x7F : 0xFF;
+    }
     return 0xFF;
 }
 static void io_fdc_write(uint16_t addr, uint8_t val, void *ctx) {
@@ -421,4 +453,18 @@ static void io_fdc_write(uint16_t addr, uint8_t val, void *ctx) {
         uint8_t density = (val >> 3) & 1;
         wd1770_select(&m->fdc, drive, side, density);
     }
+}
+
+/* ROMSEL — &FE30: sideways ROM bank select */
+static uint8_t io_romsel_read(uint16_t addr, void *ctx) {
+    (void)addr;
+    bbc_machine_t *m = (bbc_machine_t *)ctx;
+    /* On real hardware ROMSEL is write-only; reads return floating bus.
+     * Return current value for debuggability. */
+    return bbc_memory_get_romsel(m->mem);
+}
+static void io_romsel_write(uint16_t addr, uint8_t val, void *ctx) {
+    (void)addr;
+    bbc_machine_t *m = (bbc_machine_t *)ctx;
+    bbc_memory_set_romsel(m->mem, val & 0x0F);
 }

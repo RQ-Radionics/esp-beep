@@ -103,6 +103,11 @@ typedef struct {
     int32_t          cycle_acc;
     int32_t          crtc_acc;   /* sub-cycle acc for CRTC 1 MHz tick */
 
+    /* FDC DRQ latch state — readable at &FE84 bit 7 (active LOW).
+     * The Acorn 1770 DFS NMI handler reads &FE84 to distinguish INTRQ
+     * (command complete) from DRQ (data byte ready). bit7=0 → DRQ active. */
+    bool             fdc_drq_state;
+
     /* Video framebuffer output (set by caller before init) */
     bbc_video_output_t *fb_output;   /* NULL = no display */
 
@@ -123,6 +128,16 @@ typedef struct {
 void bbc_machine_init(bbc_machine_t *m,
                       const uint8_t *os_rom,    uint32_t os_size,
                       const uint8_t *basic_rom, uint32_t basic_size);
+
+/*
+ * Load a ROM into a specific sideways slot (0–15) after init.
+ * Must be called after bbc_machine_init().
+ * Conventional slots:  15 = BASIC,  14 = DFS.
+ * romSize may be 8 KB (e.g. DFS 0.9) or 16 KB.
+ */
+void bbc_machine_load_sideways_rom(bbc_machine_t *m,
+                                    const uint8_t *rom_data, uint32_t rom_size,
+                                    uint8_t slot);
 
 /* Hard reset — all chips reset, CPU reset vector fetched. */
 void bbc_machine_reset(bbc_machine_t *m);
