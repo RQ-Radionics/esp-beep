@@ -147,6 +147,30 @@ void bbc_video_vidproc_write(bbc_video_t *video, uint8_t addr, uint8_t data);
 void bbc_video_tick(bbc_video_t *video);
 
 /*
+ * Render a single output row on demand — the building block for direct-to-VGA
+ * rendering without a PSRAM framebuffer.
+ *
+ * Parameters:
+ *   out_y      — which output row to render (0 .. out_height-1)
+ *   out_height — total output height in rows (e.g. 256 for BBC_FB_HEIGHT,
+ *                or the VGA scanline count when mapping 1:1)
+ *   out_pixels — caller-provided buffer of at least out_width bytes;
+ *                each byte is filled with a BBC physical colour index (0-7)
+ *   out_width  — number of pixels to produce (e.g. 640)
+ *
+ * The function reverse-maps out_y → BBC (char_row, scanline) using the same
+ * nearest-neighbour scaling as render_frame, so output is pixel-identical
+ * to the corresponding row of bbc_video_render_frame().
+ *
+ * Read-only on BBC video state.  Safe to call from Core 1 ISR provided
+ * system_ram is not concurrently modified (take a snapshot at VSYNC for
+ * robust synchronization).
+ */
+void bbc_video_render_row(const bbc_video_t *video,
+                           int out_y, int out_height,
+                           uint8_t *out_pixels, int out_width);
+
+/*
  * Render a complete frame in one call (frame-at-a-time, non-cycle-exact).
  *
  * Reads the current CRTC and ULA registers, then sweeps through all rows and
