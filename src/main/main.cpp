@@ -16,6 +16,12 @@
  *   - VirtualKey → (row, col) mapping for BBC Model B layout
  *   - keyboardTask polls getNextVirtualKey() and calls bbc_machine_key_event()
  *
+ * SD card: SPI, FAT filesystem via esp_vfs_fat
+ *   - Pines de board.h (MOSI=13, MISO=35, CLK=14, CS=2) — VERIFY on hardware
+ *   - Mounts /sdcard; loads first .ssd or .dsd found into drive 0
+ *   - SSD format: 80 tracks × 10 sectors × 256 bytes, single-sided
+ *   - DSD format: 80 tracks × 10 sectors × 256 bytes × 2 sides (interleaved)
+ *
  * Task layout:
  *   Core 0  emulatorTask  — BBC Micro main loop (CPU + peripherals)
  *   Core 1  (FabGL ISR)   — VGA scanline DMA (runs autonomously)
@@ -25,10 +31,16 @@
 
 #include <stdio.h>
 #include <string.h>
+#include <dirent.h>
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "esp_heap_caps.h"
 #include "esp_system.h"
+#include "esp_log.h"
+#include "driver/spi_master.h"
+#include "esp_vfs_fat.h"
+#include "sdmmc_cmd.h"
+#include "driver/sdmmc_host.h"
 
 #include "fabgl.h"
 
@@ -36,6 +48,9 @@
 #include "bbc_machine.h"
 #include "sn76489.h"
 #include "roms.h"
+
+static const char *TAG_MAIN = "main";
+static const char *TAG_SD   = "sd";
 
 /* -----------------------------------------------------------------------
  * Back-buffer dimensions
@@ -62,9 +77,6 @@ static const fabgl::RGB888 s_bbc_palette[8] = {
  * BBC Micro Model B keyboard matrix mapping
  *
  * The BBC keyboard is a 10-row × 8-column matrix.
- * Columns 0-7 are strobed; rows 0-9 are sensed.
- *
- * Physical layout (from Acorn BBC Micro Advanced User Guide):
  *
  *  row\col  0       1       2       3       4       5       6       7
  *  0        SHIFT   Q       F0      1       CAPS    SHIFTLK TAB     ESCAPE
@@ -77,22 +89,9 @@ static const fabgl::RGB888 s_bbc_palette[8] = {
  *  7        (none)  F7      MINUS   EQUALS  AT      COLON   SLASH   (none)
  *  8        F1      F2      F3      BREAK   (none)  UP      (none)  DELETE
  *  9        (none)  (none)  (none)  COPY    (none)  RIGHT   RETURN  (none)
- *
- * (COPY = end-of-line / copy key on BBC; we map it to END)
- * (AT = '@'; COLON = ':'; BREAK = F12 on PC)
- *
- * Encoding: BBC_KEY(row, col) packed as (row<<4)|col — 0xFF = no mapping.
  * ----------------------------------------------------------------------- */
-#define BBC_KEY(r, c)  (uint8_t)(((r) << 4) | (c))
-#define BBC_NONE       0xFF
-
-/* Lookup table: indexed by VirtualKey enum value.
- * VK_NONE=0 is not in the table; we check for VK_NONE explicitly.
- * Size must cover all VK_ values we care about. */
-
 struct BbcKeyPos { uint8_t row; uint8_t col; };
 
-/* Returns {0xFF,0xFF} for no mapping */
 static BbcKeyPos vk_to_bbc(fabgl::VirtualKey vk)
 {
     using namespace fabgl;
@@ -100,13 +99,11 @@ static BbcKeyPos vk_to_bbc(fabgl::VirtualKey vk)
     /* Row 0 */
     case VK_LSHIFT:     case VK_RSHIFT:     return {0, 0};
     case VK_q:          case VK_Q:          return {0, 1};
-    case VK_F10:                            return {0, 2}; /* F0 on BBC */
+    case VK_F10:                            return {0, 2};
     case VK_1:                              return {0, 3};
     case VK_CAPSLOCK:                       return {0, 4};
-    /* SHIFTLK (shift-lock) — no direct PS/2 equivalent, skip */
     case VK_TAB:                            return {0, 6};
     case VK_ESCAPE:                         return {0, 7};
-
     /* Row 1 */
     case VK_LCTRL:      case VK_RCTRL:      return {1, 0};
     case VK_3:                              return {1, 1};
@@ -115,7 +112,6 @@ static BbcKeyPos vk_to_bbc(fabgl::VirtualKey vk)
     case VK_a:          case VK_A:          return {1, 4};
     case VK_s:          case VK_S:          return {1, 5};
     case VK_z:          case VK_Z:          return {1, 6};
-
     /* Row 2 */
     case VK_4:                              return {2, 1};
     case VK_e:          case VK_E:          return {2, 2};
@@ -124,7 +120,6 @@ static BbcKeyPos vk_to_bbc(fabgl::VirtualKey vk)
     case VK_f:          case VK_F:          return {2, 5};
     case VK_x:          case VK_X:          return {2, 6};
     case VK_c:          case VK_C:          return {2, 7};
-
     /* Row 3 */
     case VK_5:                              return {3, 1};
     case VK_t:          case VK_T:          return {3, 2};
@@ -133,7 +128,6 @@ static BbcKeyPos vk_to_bbc(fabgl::VirtualKey vk)
     case VK_h:          case VK_H:          return {3, 5};
     case VK_v:          case VK_V:          return {3, 6};
     case VK_b:          case VK_B:          return {3, 7};
-
     /* Row 4 */
     case VK_F4:                             return {4, 1};
     case VK_7:                              return {4, 2};
@@ -142,7 +136,6 @@ static BbcKeyPos vk_to_bbc(fabgl::VirtualKey vk)
     case VK_j:          case VK_J:          return {4, 5};
     case VK_n:          case VK_N:          return {4, 6};
     case VK_SPACE:                          return {4, 7};
-
     /* Row 5 */
     case VK_F5:                             return {5, 1};
     case VK_i:          case VK_I:          return {5, 2};
@@ -151,7 +144,6 @@ static BbcKeyPos vk_to_bbc(fabgl::VirtualKey vk)
     case VK_k:          case VK_K:          return {5, 5};
     case VK_m:          case VK_M:          return {5, 6};
     case VK_COMMA:                          return {5, 7};
-
     /* Row 6 */
     case VK_F6:                             return {6, 1};
     case VK_9:                              return {6, 2};
@@ -159,15 +151,13 @@ static BbcKeyPos vk_to_bbc(fabgl::VirtualKey vk)
     case VK_p:          case VK_P:          return {6, 4};
     case VK_l:          case VK_L:          return {6, 5};
     case VK_PERIOD:                         return {6, 7};
-
     /* Row 7 */
     case VK_F7:                             return {7, 1};
     case VK_MINUS:                          return {7, 2};
     case VK_EQUALS:                         return {7, 3};
-    case VK_AT:                             return {7, 4}; /* '@' = BBC @ key */
-    case VK_COLON:      case VK_SEMICOLON:  return {7, 5}; /* BBC ':'/';' same key */
+    case VK_AT:                             return {7, 4};
+    case VK_COLON:      case VK_SEMICOLON:  return {7, 5};
     case VK_SLASH:                          return {7, 6};
-
     /* Row 8 */
     case VK_F1:                             return {8, 0};
     case VK_F2:                             return {8, 1};
@@ -175,15 +165,200 @@ static BbcKeyPos vk_to_bbc(fabgl::VirtualKey vk)
     case VK_F12:                            return {8, 3}; /* BREAK */
     case VK_UP:         case VK_KP_UP:      return {8, 5};
     case VK_DELETE:     case VK_BACKSPACE:  return {8, 7};
-
     /* Row 9 */
     case VK_END:        case VK_KP_END:     return {9, 3}; /* COPY */
     case VK_RIGHT:      case VK_KP_RIGHT:   return {9, 5};
     case VK_RETURN:     case VK_KP_ENTER:   return {9, 6};
-
-    /* Unmapped */
     default:                                return {0xFF, 0xFF};
     }
+}
+
+/* -----------------------------------------------------------------------
+ * SD card / disk image context
+ *
+ * BBC DFS disk formats:
+ *   SSD: single-sided, 80 tracks × 10 sectors × 256 B
+ *        offset(track, sector) = (track * 10 + sector) * 256
+ *   DSD: double-sided, sides interleaved by track:
+ *        offset(track, side, sector) = ((track * 2 + side) * 10 + sector) * 256
+ * ----------------------------------------------------------------------- */
+#define BBC_SECTORS_PER_TRACK  10
+#define BBC_SECTOR_SIZE        256
+#define BBC_TRACKS             80
+
+typedef struct {
+    FILE   *fp;          /* open file handle; NULL = no disk */
+    bool    is_dsd;      /* true = double-sided (.dsd), false = single (.ssd) */
+    bool    read_only;   /* write-protect flag */
+} bbc_disk_ctx_t;
+
+static bbc_disk_ctx_t s_disk[2];   /* drive 0 and drive 1 */
+
+static int disk_read_sector(void *user_ctx,
+                             uint8_t drive, uint8_t track, uint8_t sector,
+                             uint8_t side, uint8_t /*density*/,
+                             uint8_t *buf, uint16_t *len)
+{
+    bbc_disk_ctx_t *ctx = (bbc_disk_ctx_t *)user_ctx;
+    if (!ctx || !ctx->fp) return -1;
+    if (track  >= BBC_TRACKS)             return -1;
+    if (sector >= BBC_SECTORS_PER_TRACK)  return -1;
+    if (!ctx->is_dsd && side != 0)        return -1;
+
+    long offset;
+    if (ctx->is_dsd) {
+        offset = (long)((track * 2 + side) * BBC_SECTORS_PER_TRACK + sector)
+                 * BBC_SECTOR_SIZE;
+    } else {
+        offset = (long)(track * BBC_SECTORS_PER_TRACK + sector)
+                 * BBC_SECTOR_SIZE;
+    }
+
+    if (fseek(ctx->fp, offset, SEEK_SET) != 0) return -1;
+    size_t n = fread(buf, 1, BBC_SECTOR_SIZE, ctx->fp);
+    if (n != BBC_SECTOR_SIZE) return -1;
+
+    *len = BBC_SECTOR_SIZE;
+    return 0;
+}
+
+static int disk_write_sector(void *user_ctx,
+                              uint8_t drive, uint8_t track, uint8_t sector,
+                              uint8_t side, uint8_t /*density*/, bool /*deleted*/,
+                              const uint8_t *buf, uint16_t len)
+{
+    bbc_disk_ctx_t *ctx = (bbc_disk_ctx_t *)user_ctx;
+    if (!ctx || !ctx->fp)   return -1;
+    if (ctx->read_only)     return -1;
+    if (track  >= BBC_TRACKS)             return -1;
+    if (sector >= BBC_SECTORS_PER_TRACK)  return -1;
+    if (!ctx->is_dsd && side != 0)        return -1;
+    if (len != BBC_SECTOR_SIZE)           return -1;
+
+    long offset;
+    if (ctx->is_dsd) {
+        offset = (long)((track * 2 + side) * BBC_SECTORS_PER_TRACK + sector)
+                 * BBC_SECTOR_SIZE;
+    } else {
+        offset = (long)(track * BBC_SECTORS_PER_TRACK + sector)
+                 * BBC_SECTOR_SIZE;
+    }
+
+    if (fseek(ctx->fp, offset, SEEK_SET) != 0) return -1;
+    size_t n = fwrite(buf, 1, BBC_SECTOR_SIZE, ctx->fp);
+    if (n != BBC_SECTOR_SIZE) return -1;
+    fflush(ctx->fp);
+    return 0;
+}
+
+static void disk_seek(void * /*user_ctx*/, uint8_t /*drive*/, uint8_t /*track*/)
+{
+    /* No physical head movement needed for file-backed images */
+}
+
+/*
+ * Mount SD card via SPI and try to open the first .ssd or .dsd file found.
+ * Returns true if a disk image was found and mounted on drive 0.
+ */
+static bool sd_init_and_mount_disk(bbc_machine_t *m)
+{
+    /* --- Mount SD card -------------------------------------------------- */
+    sdmmc_host_t host = SDSPI_HOST_DEFAULT();
+
+    sdspi_device_config_t slot_config = SDSPI_DEVICE_CONFIG_DEFAULT();
+    slot_config.gpio_cs   = BOARD_SD_CS;
+    slot_config.host_id   = (spi_host_device_t)host.slot;
+
+    /* SPI bus config */
+    spi_bus_config_t bus_cfg = {};
+    bus_cfg.mosi_io_num   = BOARD_SD_MOSI;
+    bus_cfg.miso_io_num   = BOARD_SD_MISO;
+    bus_cfg.sclk_io_num   = BOARD_SD_CLK;
+    bus_cfg.quadwp_io_num = -1;
+    bus_cfg.quadhd_io_num = -1;
+
+    esp_err_t err = spi_bus_initialize((spi_host_device_t)host.slot,
+                                        &bus_cfg, SDSPI_DEFAULT_DMA);
+    if (err != ESP_OK) {
+        ESP_LOGW(TAG_SD, "SPI bus init failed: %s", esp_err_to_name(err));
+        return false;
+    }
+
+    esp_vfs_fat_sdmmc_mount_config_t mount_cfg = {};
+    mount_cfg.format_if_mount_failed = false;
+    mount_cfg.max_files              = 4;
+    mount_cfg.allocation_unit_size  = 0;
+
+    sdmmc_card_t *card = nullptr;
+    err = esp_vfs_fat_sdspi_mount(BOARD_SD_MOUNT, &host, &slot_config,
+                                   &mount_cfg, &card);
+    if (err != ESP_OK) {
+        ESP_LOGW(TAG_SD, "SD mount failed: %s — no disk available",
+                 esp_err_to_name(err));
+        return false;
+    }
+
+    ESP_LOGI(TAG_SD, "SD mounted at %s", BOARD_SD_MOUNT);
+    sdmmc_card_print_info(stdout, card);
+
+    /* --- Find first .ssd or .dsd ---------------------------------------- */
+    DIR *dir = opendir(BOARD_SD_MOUNT);
+    if (!dir) {
+        ESP_LOGW(TAG_SD, "Cannot open %s", BOARD_SD_MOUNT);
+        return false;
+    }
+
+    char img_path[300] = {};
+    bool img_is_dsd = false;
+
+    struct dirent *ent;
+    while ((ent = readdir(dir)) != NULL) {
+        if (ent->d_type != DT_REG) continue;
+        const char *name = ent->d_name;
+        size_t nlen = strlen(name);
+        if (nlen < 4) continue;
+        const char *ext = name + nlen - 4;
+        if (strcasecmp(ext, ".ssd") == 0 || strcasecmp(ext, ".dsd") == 0) {
+            snprintf(img_path, sizeof(img_path), "%s/%s",
+                     BOARD_SD_MOUNT, name);
+            img_is_dsd = (strcasecmp(ext, ".dsd") == 0);
+            break;
+        }
+    }
+    closedir(dir);
+
+    if (img_path[0] == '\0') {
+        ESP_LOGW(TAG_SD, "No .ssd or .dsd found on SD card");
+        return false;
+    }
+
+    /* --- Open image and mount on drive 0 -------------------------------- */
+    s_disk[0].fp        = fopen(img_path, "r+b");
+    s_disk[0].is_dsd    = img_is_dsd;
+    s_disk[0].read_only = false;
+
+    if (!s_disk[0].fp) {
+        /* Try read-only */
+        s_disk[0].fp        = fopen(img_path, "rb");
+        s_disk[0].read_only = true;
+    }
+
+    if (!s_disk[0].fp) {
+        ESP_LOGE(TAG_SD, "Cannot open %s", img_path);
+        return false;
+    }
+
+    ESP_LOGI(TAG_SD, "Mounting %s as drive 0 (%s, %s)",
+             img_path,
+             img_is_dsd ? "DSD" : "SSD",
+             s_disk[0].read_only ? "read-only" : "read-write");
+
+    bbc_machine_mount_disk(m, 0,
+                           disk_read_sector,
+                           disk_write_sector,
+                           disk_seek,
+                           &s_disk[0]);
+    return true;
 }
 
 /* -----------------------------------------------------------------------
@@ -192,8 +367,7 @@ static BbcKeyPos vk_to_bbc(fabgl::VirtualKey vk)
 static fabgl::VGADirectController s_vga;
 static fabgl::PS2Controller       s_ps2;
 
-/* Back-buffer in PSRAM: BBC_BUF_H rows × BBC_BUF_W cols, 1 byte/pixel.
- * Written by emulatorTask (Core 0), read by FabGL scanline ISR (Core 1). */
+/* Back-buffer in PSRAM: BBC_BUF_H rows × BBC_BUF_W cols, 1 byte/pixel. */
 static uint8_t *s_backbuf = nullptr;
 
 /* Pre-computed 8bpp VGA signal bytes for each BBC colour index. */
@@ -204,10 +378,6 @@ static bbc_machine_t *machine = nullptr;
 
 /* -----------------------------------------------------------------------
  * VGADirectController draw-scanline callback (IRAM, Core 1 ISR context)
- *
- * VGA 640×480@60Hz → 480 scanlines.
- * BBC active area: 256 rows → 512 VGA lines (double-scan).
- * Simple mapping: bbc_row = scanLine / 2; blank if out of [0, BBC_BUF_H).
  * ----------------------------------------------------------------------- */
 static void IRAM_ATTR draw_scanline(void * /*arg*/, uint8_t *dest, int scanLine)
 {
@@ -225,16 +395,10 @@ static void IRAM_ATTR draw_scanline(void * /*arg*/, uint8_t *dest, int scanLine)
     }
 }
 
-/* -----------------------------------------------------------------------
- * frame_cb — no explicit flip needed (single-buffer, ISR reads latest).
- * ----------------------------------------------------------------------- */
-static void on_frame_ready(void * /*ctx*/)
-{
-}
+static void on_frame_ready(void * /*ctx*/) {}
 
 /* -----------------------------------------------------------------------
- * Keyboard task — reads VirtualKeys from FabGL and feeds BBC matrix.
- * Runs on Core 1.
+ * Keyboard task
  * ----------------------------------------------------------------------- */
 static void keyboardTask(void *arg)
 {
@@ -251,18 +415,17 @@ static void keyboardTask(void *arg)
 
     while (true) {
         fabgl::VirtualKeyItem item;
-        if (kb->getNextVirtualKey(&item, 10 /* ms timeout */)) {
+        if (kb->getNextVirtualKey(&item, 10)) {
             if (!machine) continue;
             BbcKeyPos pos = vk_to_bbc(item.vk);
-            if (pos.row == 0xFF) continue;          /* unmapped key */
+            if (pos.row == 0xFF) continue;
             bbc_machine_key_event(machine, pos.row, pos.col, item.down);
         }
     }
 }
 
 /* -----------------------------------------------------------------------
- * Audio task — renders SN76489 samples and pushes them to the DAC.
- * Runs on Core 1 so audio is independent of emulator timing.
+ * Audio task
  * ----------------------------------------------------------------------- */
 static void audioTask(void *arg)
 {
@@ -286,13 +449,12 @@ static void audioTask(void *arg)
 }
 
 /* -----------------------------------------------------------------------
- * Emulator task — BBC Micro at 2 MHz on Core 0.
+ * Emulator task
  * ----------------------------------------------------------------------- */
 static void emulatorTask(void *arg)
 {
     (void)arg;
 
-    /* Configure video: INDEX8 framebuffer in PSRAM back-buffer */
     bbc_video_output_t fb_out = {};
     fb_out.format      = BBC_FB_FORMAT_INDEX8;
     fb_out.width       = BBC_BUF_W;
@@ -306,9 +468,6 @@ static void emulatorTask(void *arg)
     bbc_machine_reset(machine);
     printf("[emu] BBC Micro reset, running...\n");
 
-    /*
-     * 2 MHz 6502 → 2000 cycles per 1 ms FreeRTOS tick.
-     */
     int cycles_budget = 0;
     while (true) {
         cycles_budget += 2000;
@@ -345,12 +504,8 @@ extern "C" void app_main(void)
     printf("[vga] VGADirectController running\n");
 
     /* --- PS/2 keyboard init --------------------------------------------- */
-    /*
-     * Use explicit GPIO form so we read from board.h.
-     * Only keyboard on port 0; no mouse.
-     */
     s_ps2.begin(BOARD_PS2_KBD_CLK, BOARD_PS2_KBD_DATA);
-    printf("[kbd] PS/2 controller init on CLK=%d DATA=%d\n",
+    printf("[kbd] PS/2 controller on CLK=%d DATA=%d\n",
            (int)BOARD_PS2_KBD_CLK, (int)BOARD_PS2_KBD_DATA);
 
     /* --- Back-buffer in PSRAM ------------------------------------------- */
@@ -378,6 +533,14 @@ extern "C" void app_main(void)
     bbc_machine_init(machine,
                      os12_rom,   os_size,
                      basic2_rom, basic_size);
+
+    /* --- SD card + disk image ------------------------------------------- */
+    memset(s_disk, 0, sizeof(s_disk));
+    if (sd_init_and_mount_disk(machine)) {
+        printf("[sd] disk image mounted on drive 0\n");
+    } else {
+        printf("[sd] no disk — running without floppy\n");
+    }
 
     printf("[mem] free PSRAM after init: %lu bytes\n",
            (unsigned long)heap_caps_get_free_size(MALLOC_CAP_SPIRAM));
