@@ -1,0 +1,705 @@
+;
+; 6 5 0 2   I N T E R R U P T   T E S T
+;
+; Copyright (C) 2013  Klaus Dormann
+;
+; Ported from AS65 syntax to CA65 syntax for cc65 toolchain.
+; Original: https://github.com/Klaus2m5/6502_65C02_functional_tests
+;
+; Assemble:
+;   ca65 -t none 6502_interrupt_test.ca65
+;   ld65 6502_interrupt_test.o -o 6502_interrupt_test.bin -C interrupt_test.cfg
+;
+
+; C O N F I G U R A T I O N
+;
+;ROM_vectors MUST be writable & the I_flag MUST be alterable
+
+; load_data_direct=1: data loaded directly (segments placed by linker)
+load_data_direct = 1
+
+;NMI & IRQ are tested with a feedback register
+;emulators diag register
+I_port      = $bffc     ;feedback port address
+I_ddr       = 0         ;feedback DDR address, 0 = no DDR
+I_drive     = 1         ;0 = totem pole, 1 = open collector
+IRQ_bit     = 0         ;bit number of feedback to IRQ
+NMI_bit     = 1         ;bit number of feedback to NMI, -1 if not available
+I_filter    = $7f       ;filtering bit 7 = diag stop
+
+;decimal mode flag during IRQ, NMI & BRK
+D_clear     = 0         ;0 = not cleared (NMOS), 1 = cleared (CMOS)
+
+;configure memory
+zero_page    = $0a
+data_segment = $0200
+code_segment = $0400
+
+;report errors through I/O channel (0=standard trap loops)
+report = 0
+
+;macros for error & success traps
+.if report = 0
+.macro trap
+        jmp *           ;failed anyway
+.endmacro
+.macro trap_eq
+        beq *           ;failed equal (zero)
+.endmacro
+.macro trap_ne
+        bne *           ;failed not equal (non zero)
+.endmacro
+.macro success
+        jmp *           ;test passed, no errors
+.endmacro
+.endif
+
+.if report = 1
+.macro trap
+        jsr report_error
+.endmacro
+.macro trap_eq
+        bne :+
+        trap
+:
+.endmacro
+.macro trap_ne
+        beq :+
+        trap
+:
+.endmacro
+.macro success
+        jsr report_success
+.endmacro
+.endif
+
+carry   = %00000001
+zero    = %00000010
+intdis  = %00000100
+decmode = %00001000
+break   = %00010000
+reserv  = %00100000
+overfl  = %01000000
+minus   = %10000000
+
+fc      = carry
+fz      = zero
+fzc     = carry+zero
+fv      = overfl
+fvz     = overfl+zero
+fn      = minus
+fnc     = minus+carry
+fnz     = minus+zero
+fnzc    = minus+zero+carry
+fnv     = minus+overfl
+
+fao     = break+reserv     ;bits always on after PHP, BRK
+fai     = fao+intdis       ;+ forced interrupt disable
+m8      = $ff              ;8 bit mask
+m8i     = $ff & ~intdis    ;8 bit mask - interrupt disable
+
+.macro push_stat arg1
+        lda #arg1
+        pha
+.endmacro
+
+.macro set_stat arg1
+        lda #arg1
+        pha
+        plp
+.endmacro
+
+; ---- BSS (zero page data) ----
+.segment "ZEROPAGE"
+        .org zero_page
+zpt:
+irq_a:  .res 1          ;a register
+irq_x:  .res 1          ;x register
+irq_f:  .res 1          ;flags
+nmi_a:  .res 1          ;a register
+nmi_x:  .res 1          ;x register
+nmi_f:  .res 1          ;flags
+zp_bss:
+
+;fixed stack locations
+lst_f   = $1fe          ;last flags before interrupt
+lst_a   = $1ff          ;last accumulator before interrupt
+
+; ---- DATA segment ----
+.segment "DATA"
+        .org data_segment
+
+nmi_count: .res 1       ;lowest number handled first, $ff = never
+irq_count: .res 1       ;separation-1 = instructions between interrupts
+brk_count: .res 1
+I_src:     .res 1       ;bit: 0=BRK, 1=IRQ, 2=NMI
+data_bss:
+
+; ---- CODE segment ----
+.segment "CODE"
+        .org code_segment
+start:  cld
+        lda #0
+        sta I_src
+        ldx #$ff
+        txs
+
+.if report = 1
+        jsr report_init
+.endif
+
+; IRQ & NMI test - requires a feedback register
+
+; With our config: I_drive=1 (open collector), I_ddr=0 (no DDR), NMI_bit=1 >= 0
+; So we fall into: NMI_bit >= 0, I_drive=1, I_ddr=0 (no DDR) branch
+
+; I_set ibit: write to I_port to assert interrupt (open collector, no DDR)
+.macro I_set ibit
+        lda I_port
+        and #I_filter
+.if ibit > 7
+        ora #(1<<IRQ_bit|1<<NMI_bit)
+.else
+        ora #(1<<(ibit))
+.endif
+        plp
+        pha
+        php
+        sta I_port
+.endmacro
+
+; I_clr ibit: clear interrupt
+.macro I_clr ibit
+        lda I_port
+        and #I_filter-(1<<(ibit))
+        sta I_port
+.endmacro
+
+        I_clr IRQ_bit   ;turn off IRQ & NMI
+        I_clr NMI_bit
+
+; IRQ integrity test - test for clear flags seen in IRQ vector
+        lda #2
+        sta I_src
+        push_stat 0
+        I_set IRQ_bit
+        nop
+        nop
+        nop
+        lda I_src
+        trap_ne         ;IRQ timeout
+        tsx
+        cpx #$ff-2
+        trap_ne         ;returned SP
+        lda irq_f
+.if D_clear = 1
+        and #decmode
+        trap_ne         ;D-flag not cleared
+        lda irq_f
+        eor lst_f
+        and #m8-fai-decmode
+        trap_ne
+.else
+        eor lst_f
+        and #m8-fai
+        trap_ne
+.endif
+        ldx #$ff
+        txs
+
+; test all other registers
+        ldx #'I'
+        ldy #'R'
+        lda #2
+        sta I_src
+        push_stat 0
+        I_set IRQ_bit
+        dey
+        dey
+        dey
+        dey
+        php
+        cpx #('I'+1)
+        trap_ne         ;returned X
+        cpy #('R'-7)
+        trap_ne         ;returned Y
+        cmp #'Q'
+        trap_ne         ;returned A
+        tsx
+        cpx #$ff-3
+        trap_ne         ;returned SP
+        pla
+        eor lst_f
+        and #$ff-fnz
+        trap_ne         ;returned flags
+        lda irq_a
+        cmp lst_a
+        trap_ne         ;IRQ A received
+        ldx #$ff
+        txs
+
+; repeat with reversed registers
+        ldx #$ff-'I'
+        ldy #$ff-'R'
+        lda #2
+        sta I_src
+        push_stat $ff-intdis
+        I_set IRQ_bit
+        dey
+        dey
+        dey
+        dey
+        php
+        cpx #($ff-'I'+1)
+        trap_ne         ;returned X
+        cpy #($ff-'R'-7)
+        trap_ne         ;returned Y
+        cmp #'Q'
+        trap_ne         ;returned A
+        tsx
+        cpx #$ff-3
+        trap_ne         ;returned SP
+        pla
+        eor lst_f
+        and #$ff-fnz
+        trap_ne         ;returned flags
+        lda irq_a
+        cmp lst_a
+        trap_ne         ;IRQ A received
+        ldx #$ff
+        txs
+
+; retest for set flags seen in IRQ vector
+        lda #2
+        sta I_src
+        push_stat $ff-intdis
+        I_set IRQ_bit
+        nop
+        nop
+        nop
+        lda I_src
+        trap_ne         ;IRQ timeout
+        tsx
+        cpx #$ff-2
+        trap_ne         ;returned SP
+        lda irq_f
+.if D_clear = 1
+        and #decmode
+        trap_ne         ;D-flag not cleared
+        lda irq_f
+        eor lst_f
+        and #m8-fai-decmode
+        trap_ne
+.else
+        eor lst_f
+        and #m8-fai
+        trap_ne
+.endif
+        ldx #$ff
+        txs
+
+; BRK integrity test - test for clear flags seen in IRQ vector
+        lda #1
+        sta I_src
+        set_stat 0
+        pha
+        php
+        brk
+        nop
+        nop
+        nop
+        nop
+        lda I_src
+        trap_ne         ;IRQ timeout
+        tsx
+        cpx #$ff-2
+        trap_ne         ;returned SP
+        lda irq_f
+.if D_clear = 1
+        and #decmode
+        trap_ne         ;D-flag not cleared
+        lda irq_f
+        eor lst_f
+        and #m8-fai-decmode
+        trap_ne
+.else
+        eor lst_f
+        and #m8-fai
+        trap_ne
+.endif
+        ldx #$ff
+        txs
+
+; test all other registers
+        ldx #'B'
+        ldy #'R'
+        lda #1
+        sta I_src
+        set_stat 0
+        pha
+        php
+        brk
+        dey
+        dey
+        dey
+        dey
+        dey
+        php
+        cpx #('B'+1)
+        trap_ne         ;returned X
+        cpy #('R'-7)
+        trap_ne         ;returned Y
+        cmp #'K'
+        trap_ne         ;returned A
+        tsx
+        cpx #$ff-3
+        trap_ne         ;returned SP
+        pla
+        eor lst_f
+        and #$ff-fnz
+        trap_ne         ;returned flags
+        lda irq_a
+        cmp lst_a
+        trap_ne         ;IRQ A received
+        ldx #$ff
+        txs
+
+; repeat with reversed registers
+        ldx #$ff-'B'
+        ldy #$ff-'R'
+        lda #1
+        sta I_src
+        set_stat $ff
+        pha
+        php
+        brk
+        dey
+        dey
+        dey
+        dey
+        dey
+        php
+        cpx #($ff-'B'+1)
+        trap_ne         ;returned X
+        cpy #($ff-'R'-7)
+        trap_ne         ;returned Y
+        cmp #'K'
+        trap_ne         ;returned A
+        tsx
+        cpx #$ff-3
+        trap_ne         ;returned SP
+        pla
+        eor lst_f
+        and #$ff-fnz
+        trap_ne         ;returned flags
+        lda irq_a
+        cmp lst_a
+        trap_ne         ;IRQ A received
+        ldx #$ff
+        txs
+
+; retest for set flags seen in IRQ vector
+        lda #1
+        sta I_src
+        set_stat $ff
+        pha
+        php
+        brk
+        nop
+        nop
+        nop
+        nop
+        lda I_src
+        trap_ne         ;IRQ timeout
+        tsx
+        cpx #$ff-2
+        trap_ne         ;returned SP
+        lda irq_f
+.if D_clear = 1
+        and #decmode
+        trap_ne         ;D-flag not cleared
+        lda irq_f
+        eor lst_f
+        and #m8-fai-decmode
+        trap_ne
+.else
+        eor lst_f
+        and #m8-fai
+        trap_ne
+.endif
+        ldx #$ff
+        txs
+
+; NMI_bit >= 0: NMI integrity test
+; test for clear flags seen in NMI vector
+        lda #4
+        sta I_src
+        push_stat 0
+        I_set NMI_bit
+        nop
+        nop
+        nop
+        lda I_src
+        trap_ne         ;NMI timeout
+        tsx
+        cpx #$ff-2
+        trap_ne         ;returned SP
+        lda nmi_f
+.if D_clear = 1
+        and #decmode
+        trap_ne         ;D-flag not cleared
+        lda nmi_f
+        eor lst_f
+        and #m8-fai-decmode
+        trap_ne
+.else
+        eor lst_f
+        and #m8-fai
+        trap_ne
+.endif
+        ldx #$ff
+        txs
+
+; test all other registers
+        ldx #'N'
+        ldy #'M'
+        lda #4
+        sta I_src
+        push_stat 0
+        I_set NMI_bit
+        dey
+        dey
+        dey
+        dey
+        php
+        cpx #('N'+1)
+        trap_ne         ;returned X
+        cpy #('M'-7)
+        trap_ne         ;returned Y
+        cmp #'I'
+        trap_ne         ;returned A
+        tsx
+        cpx #$ff-3
+        trap_ne         ;returned SP
+        pla
+        eor lst_f
+        and #$ff-fnz
+        trap_ne         ;returned flags
+        lda nmi_a
+        cmp lst_a
+        trap_ne         ;NMI A received
+        ldx #$ff
+        txs
+
+; repeat with reversed registers
+        ldx #$ff-'N'
+        ldy #$ff-'M'
+        lda #4
+        sta I_src
+        push_stat $ff-intdis
+        I_set NMI_bit
+        dey
+        dey
+        dey
+        dey
+        php
+        cpx #($ff-'N'+1)
+        trap_ne         ;returned X
+        cpy #($ff-'M'-7)
+        trap_ne         ;returned Y
+        cmp #'I'
+        trap_ne         ;returned A
+        tsx
+        cpx #$ff-3
+        trap_ne         ;returned SP
+        pla
+        eor lst_f
+        and #$ff-fnz
+        trap_ne         ;returned flags
+        lda nmi_a
+        cmp lst_a
+        trap_ne         ;NMI A received
+        ldx #$ff
+        txs
+
+; retest for set flags seen in NMI vector
+        lda #4
+        sta I_src
+        push_stat $ff-intdis
+        I_set NMI_bit
+        nop
+        nop
+        nop
+        lda I_src
+        trap_ne         ;NMI timeout
+        tsx
+        cpx #$ff-2
+        trap_ne         ;returned SP
+        lda nmi_f
+.if D_clear = 1
+        and #decmode
+        trap_ne         ;D-flag not cleared
+        lda nmi_f
+        eor lst_f
+        and #m8-fai-decmode
+        trap_ne
+.else
+        eor lst_f
+        and #m8-fai
+        trap_ne
+.endif
+        ldx #$ff
+        txs
+
+; test IRQ & NMI with interrupts disabled
+        ldx #0
+        lda #4          ;NMI only expected
+        sta I_src
+        push_stat intdis
+        I_set 8         ;both interrupts pending
+        inx
+        inx
+        inx
+        lda I_src
+        trap_ne         ;NMI not done
+        ldx #0
+        lda #2          ;re-enable IRQ
+        sta I_src
+        cli
+        inx
+        inx
+        inx
+        lda I_src
+        trap_ne         ;IRQ not done
+        ldx #$ff
+        txs
+
+; test overlapping NMI, IRQ & BRK
+        ldx #0
+        lda #7
+        sta I_src
+        lda #$ff
+        sta nmi_count
+        sta irq_count
+        sta brk_count
+        push_stat 0
+        I_set 8         ;trigger NMI + IRQ
+        brk
+        inx
+        inx
+        inx
+        inx
+        inx
+        inx
+        inx
+        inx
+        lda I_src
+        trap_ne         ;lost an interrupt
+
+; S U C C E S S
+        success
+        jmp start       ;run again
+
+;---------------------------------------------------------------------------
+; IRQ/NMI/BRK handlers
+        dey
+        dey
+nmi_trap:
+        php
+        dey
+        dey
+        dey
+        sta nmi_a
+        stx nmi_x
+        pla
+        pha
+        sta nmi_f
+        lda I_src
+        and #4
+        trap_eq         ;unexpected NMI
+        pla
+        pha
+        and #intdis
+        trap_eq         ;I-flag not set
+        pla
+        eor #m8-fai-decmode
+        pha
+        tsx
+        lda $102,x
+        and #break
+        trap_ne         ;unexpected B-flag
+        lda I_src
+        and #$ff-4
+        sta I_src
+        I_clr NMI_bit
+        ldx nmi_x
+        inx
+        stx nmi_count
+        lda #'I'
+        plp
+        rti
+
+res_trap:
+        trap            ;unexpected RESET
+
+        dey
+        dey
+irq_trap:
+        php
+        dey
+        dey
+        dey
+        sta irq_a
+        stx irq_x
+        pla
+        pha
+        sta irq_f
+        lda I_src
+        and #3
+        trap_eq         ;unexpected IRQ/BRK
+        pla
+        pha
+        and #intdis
+        trap_eq         ;I-flag not set
+        pla
+        eor #m8-fai-decmode
+        pha
+        tsx
+        lda $102,x
+        and #break
+        bne brk_trap
+
+        lda I_src
+        and #2
+        trap_eq         ;unexpected IRQ
+        lda I_src
+        and #$ff-2
+        sta I_src
+        I_clr IRQ_bit
+        ldx irq_x
+        inx
+        stx irq_count
+        lda #'Q'
+        plp
+        rti
+
+brk_trap:
+        lda I_src
+        and #1
+        trap_eq         ;unexpected BRK
+        lda I_src
+        and #$ff-1
+        sta I_src
+        ldx irq_x
+        inx
+        stx brk_count
+        lda irq_a
+        lda #'K'
+        plp
+        rti
+
+; system vectors placed by linker in VECTORS segment at $FFFA
+.segment "VECTORS"
+        .word nmi_trap
+        .word res_trap
+        .word irq_trap

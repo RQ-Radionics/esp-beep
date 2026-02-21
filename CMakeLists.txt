@@ -1,11 +1,15 @@
 cmake_minimum_required(VERSION 3.16)
 
 set(EXTRA_COMPONENT_DIRS 
-    components/vrEmu6502/src
+    src/main
     components/bbc_cpu
     components/bbc_memory
     components/bbc_video
-    components/fabgl
+    components/bbc_machine
+    components/wd1770
+    components/m6522
+    components/sn76489
+    ext/fabgl
 )
 
 include($ENV{IDF_PATH}/tools/cmake/project.cmake)

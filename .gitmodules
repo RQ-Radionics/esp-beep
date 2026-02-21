@@ -1,0 +1,6 @@
+[submodule "components/vrEmu6502"]
+	path = ext/vrEmu6502
+	url = git@github.com:rampa069/vrEmu6502.git
+[submodule "components/fabgl"]
+	path = ext/fabgl
+	url = git@github.com:rampa069/FabGL.git
