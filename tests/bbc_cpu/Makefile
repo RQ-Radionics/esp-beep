@@ -3,21 +3,39 @@ CFLAGS  = -std=c11 -Wall -Wextra -O2 \
            -DVR_EMU_6502_STATIC \
            -I../../ext/vrEmu6502/src
 
-SRCS    = test_6502_functional.c \
-          ../../ext/vrEmu6502/src/vrEmu6502.c
+VR6502_SRC = ../../ext/vrEmu6502/src/vrEmu6502.c
 
-TARGET  = test_6502_functional
-BIN     = 6502_functional_test.bin
+CA65    = ca65
+LD65    = ld65
 
 .PHONY: all test clean
 
-all: $(TARGET)
+all: test_6502_functional test_6502_interrupt 6502_interrupt_test.bin
 
-$(TARGET): $(SRCS)
+# --- Functional test ---
+test_6502_functional: test_6502_functional.c $(VR6502_SRC)
 	$(CC) $(CFLAGS) -o $@ $^
 
-test: $(TARGET) $(BIN)
-	./$(TARGET) $(BIN)
+# --- Interrupt test binary (assembled from ca65 source) ---
+6502_interrupt_test.bin: 6502_interrupt_test.ca65 interrupt_test.cfg
+	$(CA65) -t none -o 6502_interrupt_test.o 6502_interrupt_test.ca65
+	$(LD65) 6502_interrupt_test.o -o $@ -m 6502_interrupt_test.map -C interrupt_test.cfg
+	@rm -f 6502_interrupt_test.o
+
+# --- Interrupt test harness ---
+test_6502_interrupt: test_6502_interrupt.c $(VR6502_SRC)
+	$(CC) $(CFLAGS) -o $@ $^
+
+# --- Run all tests ---
+test: test_6502_functional 6502_functional_test.bin \
+      test_6502_interrupt   6502_interrupt_test.bin
+	@echo "=== Functional Test ==="
+	./test_6502_functional 6502_functional_test.bin
+	@echo ""
+	@echo "=== Interrupt Test ==="
+	./test_6502_interrupt 6502_interrupt_test.bin
 
 clean:
-	rm -f $(TARGET)
+	rm -f test_6502_functional test_6502_interrupt \
+	      6502_interrupt_test.bin 6502_interrupt_test.o \
+	      6502_interrupt_test.map 6502_interrupt_test.lst

@@ -67,3 +67,6 @@ __pycache__/
 build/
 sdkconfig
 tests/bbc_cpu/test_6502_functional
+tests/bbc_cpu/test_6502_interrupt
+tests/bbc_cpu/6502_interrupt_test.map
+tests/bbc_cpu/6502_interrupt_test.lst
