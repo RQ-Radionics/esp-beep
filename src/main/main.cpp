@@ -372,8 +372,16 @@ static bool sd_init_and_mount_disk(bbc_machine_t *m)
 static fabgl::VGADirectController s_vga;
 static fabgl::PS2Controller       s_ps2;
 
-/* Back-buffer in PSRAM: BBC_BUF_H rows × BBC_BUF_W cols, 1 byte/pixel. */
-static uint8_t *s_backbuf = nullptr;
+/* Double-buffered back-buffers in PSRAM (BBC_BUF_H × BBC_BUF_W, 1B/px).
+ *
+ * s_draw_idx: index of the buffer currently being READ by draw_scanline ISR.
+ *   The emulator always writes to s_buf[1 - s_draw_idx].
+ *   After a complete frame is rendered, the emulator atomically flips
+ *   s_draw_idx so the ISR picks up the new frame on the next VGA field.
+ *   No mutex needed: the flip is a single 32-bit store (atomic on Xtensa).
+ */
+static uint8_t *s_buf[2]       = { nullptr, nullptr };
+static volatile uint32_t s_draw_idx = 0;   /* ISR reads s_buf[s_draw_idx] */
 
 /* Pre-computed 8bpp VGA signal bytes for each BBC colour index. */
 static uint8_t s_sig[8];
@@ -400,7 +408,11 @@ static bbc_machine_t *machine = nullptr;
  */
 static void IRAM_ATTR draw_scanline(void * /*arg*/, uint8_t *dest, int scanLine)
 {
-    if (!s_backbuf) {
+    /* Read the buffer that the emulator last completed (not the one being
+     * written now).  s_draw_idx is flipped by on_frame_ready() after each
+     * complete frame — a single 32-bit store, atomic on Xtensa. */
+    const uint8_t *fb = s_buf[s_draw_idx];
+    if (!fb) {
         memset(dest, s_sig[0], 640);
         return;
     }
@@ -409,13 +421,19 @@ static void IRAM_ATTR draw_scanline(void * /*arg*/, uint8_t *dest, int scanLine)
     int bbc_row = scanLine * BBC_BUF_H / 480;
     if (bbc_row >= BBC_BUF_H) bbc_row = BBC_BUF_H - 1;
 
-    const uint8_t *src = s_backbuf + bbc_row * BBC_BUF_W;
+    const uint8_t *src = fb + bbc_row * BBC_BUF_W;
     for (int x = 0; x < 640; x++) {
         dest[x ^ 2] = s_sig[src[x] & 7];
     }
 }
 
-static void on_frame_ready(void * /*ctx*/) {}
+/* Called by bbc_video after each complete frame is rendered into the
+ * write buffer.  Flip s_draw_idx so the ISR picks up the new frame.
+ * This is a single 32-bit store — atomic on Xtensa without a mutex. */
+static void on_frame_ready(void * /*ctx*/)
+{
+    s_draw_idx ^= 1u;
+}
 
 /* -----------------------------------------------------------------------
  * Keyboard task
@@ -477,11 +495,14 @@ static void emulatorTask(void *arg)
 {
     (void)arg;
 
+    /* Emulator always writes to the buffer NOT being read by the ISR.
+     * s_draw_idx starts at 0 → ISR reads s_buf[0] → we write s_buf[1].
+     * on_frame_ready() flips s_draw_idx after each complete frame. */
     bbc_video_output_t fb_out = {};
     fb_out.format      = BBC_FB_FORMAT_INDEX8;
     fb_out.width       = BBC_BUF_W;
     fb_out.height      = BBC_BUF_H;
-    fb_out.framebuffer = s_backbuf;
+    fb_out.framebuffer = s_buf[1];   /* write buffer = 1 - s_draw_idx(=0) */
     fb_out.fb_stride   = BBC_BUF_W;
 
     bbc_machine_set_video_output(machine, &fb_out);
@@ -497,7 +518,12 @@ static void emulatorTask(void *arg)
             int c = bbc_machine_step(machine);
             cycles_budget -= c;
         }
+        /* Render into the write buffer (1 - s_draw_idx), then flip. */
+        uint32_t write_idx = 1u - s_draw_idx;
+        fb_out.framebuffer = s_buf[write_idx];
+        bbc_machine_set_video_output(machine, &fb_out);
         bbc_video_render_frame(&machine->video);
+        /* on_frame_ready() flips s_draw_idx after render completes */
         vTaskDelay(1);
     }
 }
@@ -517,14 +543,18 @@ extern "C" void app_main(void)
                 BOARD_VGA_B1,    BOARD_VGA_B0,
                 BOARD_VGA_HSYNC, BOARD_VGA_VSYNC);
 
-    /* --- Back-buffer in PSRAM ------------------------------------------- */
-    s_backbuf = (uint8_t *)heap_caps_malloc(
-        BBC_BUF_H * BBC_BUF_W, MALLOC_CAP_SPIRAM);
-    if (!s_backbuf) {
-        printf("[main] back-buffer alloc failed — need PSRAM\n");
-        return;
+    /* --- Double back-buffers in PSRAM ------------------------------------ */
+    for (int i = 0; i < 2; i++) {
+        s_buf[i] = (uint8_t *)heap_caps_malloc(
+            BBC_BUF_H * BBC_BUF_W, MALLOC_CAP_SPIRAM);
+        if (!s_buf[i]) {
+            printf("[main] back-buffer[%d] alloc failed — need PSRAM\n", i);
+            return;
+        }
+        memset(s_buf[i], 0, BBC_BUF_H * BBC_BUF_W);
     }
-    memset(s_backbuf, 0, BBC_BUF_H * BBC_BUF_W);
+    /* ISR starts reading s_buf[0]; emulator starts writing s_buf[1]. */
+    s_draw_idx = 0;
 
     s_vga.setDrawScanlineCallback(draw_scanline, nullptr);
 
