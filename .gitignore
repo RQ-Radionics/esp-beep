@@ -70,3 +70,6 @@ tests/bbc_cpu/test_6502_functional
 tests/bbc_cpu/test_6502_interrupt
 tests/bbc_cpu/6502_interrupt_test.map
 tests/bbc_cpu/6502_interrupt_test.lst
+tests/bbc_cpu/test_6502_decimal
+tests/bbc_cpu/6502_decimal_test.map
+tests/bbc_cpu/6502_decimal_test.lst
