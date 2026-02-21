@@ -20,9 +20,12 @@
 
 #ifdef ESP_PLATFORM
 #  include "esp_log.h"
+#  include "esp_attr.h"
 #  define TT_LOGD(fmt, ...) ESP_LOGD("saa5050", fmt, ##__VA_ARGS__)
+#  define RENDER_IRAM IRAM_ATTR
 #else
 #  define TT_LOGD(fmt, ...) /* no-op */
+#  define RENDER_IRAM
 #endif
 
 /* ROM data lives in saa5050_font.c */
@@ -120,7 +123,7 @@ void saa5050_reset(saa5050_t *tt)
     TT_LOGD("reset");
 }
 
-void saa5050_start_row(saa5050_t *tt, uint8_t row_num)
+RENDER_IRAM void saa5050_start_row(saa5050_t *tt, uint8_t row_num)
 {
     if (row_num >= SAA5050_ROWS) return;
     tt->current_row       = row_num;
@@ -128,7 +131,7 @@ void saa5050_start_row(saa5050_t *tt, uint8_t row_num)
     /* dh_row_bottom is set during the previous row's render */
 }
 
-void saa5050_start_scanline(saa5050_t *tt, saa5050_line_state_t *ls,
+RENDER_IRAM void saa5050_start_scanline(saa5050_t *tt, saa5050_line_state_t *ls,
                               uint8_t scanline)
 {
     tt->current_scanline = scanline;
@@ -146,7 +149,7 @@ void saa5050_start_scanline(saa5050_t *tt, saa5050_line_state_t *ls,
     ls->held_is_sep   = false;
 }
 
-void saa5050_render_char(saa5050_t *tt, saa5050_line_state_t *ls,
+RENDER_IRAM void saa5050_render_char(saa5050_t *tt, saa5050_line_state_t *ls,
                           uint8_t char_code, uint8_t *out_pixels)
 {
     char_code &= 0x7F;

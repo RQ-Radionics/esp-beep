@@ -19,9 +19,12 @@
 
 #ifdef ESP_PLATFORM
 #  include "esp_log.h"
+#  include "esp_attr.h"
 #  define ULA_LOGD(fmt, ...) ESP_LOGD("bbc_ula", fmt, ##__VA_ARGS__)
+#  define RENDER_IRAM IRAM_ATTR
 #else
 #  define ULA_LOGD(fmt, ...) /* no-op */
+#  define RENDER_IRAM
 #endif
 
 /* --------------------------------------------------------------------------
@@ -206,7 +209,7 @@ void bbc_video_ula_write(bbc_video_ula_t *ula, uint8_t addr, uint8_t data)
     }
 }
 
-int bbc_video_ula_serialize(const bbc_video_ula_t *ula,
+RENDER_IRAM int bbc_video_ula_serialize(const bbc_video_ula_t *ula,
                              uint8_t data_byte,
                              uint8_t *out_colours,
                              bool cursor_active)

@@ -17,12 +17,17 @@
 
 #ifdef ESP_PLATFORM
 #  include "esp_log.h"
+#  include "esp_attr.h"
 #  define VID_LOGD(fmt, ...) ESP_LOGD("bbc_video", fmt, ##__VA_ARGS__)
 #  define VID_LOGW(fmt, ...) ESP_LOGW("bbc_video", fmt, ##__VA_ARGS__)
+/* Functions called from the FabGL draw_scanline ISR (Core 1, IRAM context)
+ * must reside in IRAM so they are reachable without the instruction cache. */
+#  define RENDER_IRAM IRAM_ATTR
 #else
 #  include <stdio.h>
 #  define VID_LOGD(fmt, ...) /* no-op */
 #  define VID_LOGW(fmt, ...) fprintf(stderr, "bbc_video WARN: " fmt "\n", ##__VA_ARGS__)
+#  define RENDER_IRAM
 #endif
 
 /* --------------------------------------------------------------------------
@@ -349,7 +354,7 @@ static void render_teletext_frame(bbc_video_t *video)
  * video->system_ram is not simultaneously written by Core 0.  For robust
  * synchronization, take a bbc_video_snapshot_t at VSYNC (see bbc_video.h).
  * -------------------------------------------------------------------------- */
-static void render_bitmap_row(const bbc_video_t *video,
+static RENDER_IRAM void render_bitmap_row(const bbc_video_t *video,
                                int out_y, int out_height,
                                uint8_t *out_pixels, int out_width)
 {
@@ -418,7 +423,7 @@ static void render_bitmap_row(const bbc_video_t *video,
 
 /* Render one SAA5050 row + scanline into out_pixels.
  * Caller must have called saa5050_start_row(tt, row) first. */
-static void render_teletext_scanline(const bbc_video_t *video,
+static RENDER_IRAM void render_teletext_scanline(const bbc_video_t *video,
                                       saa5050_t *tt, int row, int sl,
                                       int x_offset, int out_width,
                                       uint8_t *out_pixels)
@@ -450,7 +455,7 @@ static void render_teletext_scanline(const bbc_video_t *video,
     }
 }
 
-static void render_teletext_row(const bbc_video_t *video,
+static RENDER_IRAM void render_teletext_row(const bbc_video_t *video,
                                  int out_y, int out_height,
                                  uint8_t *out_pixels, int out_width)
 {
@@ -504,7 +509,7 @@ static void render_teletext_row(const bbc_video_t *video,
                              x_offset, out_width, out_pixels);
 }
 
-void bbc_video_render_row(const bbc_video_t *video,
+RENDER_IRAM void bbc_video_render_row(const bbc_video_t *video,
                            int out_y, int out_height,
                            uint8_t *out_pixels, int out_width)
 {
