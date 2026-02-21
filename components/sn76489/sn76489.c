@@ -59,14 +59,29 @@ static void build_vol_table(sn76489_t *psg)
  * -------------------------------------------------------------------------- */
 static const uint16_t s_noise_dividers[3] = { 15, 32, 64 };
 
+/*
+ * Minimum tone period that produces an audible frequency (< 20 kHz).
+ *
+ * With BBC clock 4 MHz / 16 = 250 kHz base rate:
+ *   f = 250000 / (2 * period)
+ *   period 1 → 125 kHz
+ *   period 5 → 25 kHz   (above Nyquist for 44.1/48 kHz systems)
+ *   period 6 → 20.8 kHz (first audible count at 44.1 kHz Nyquist)
+ *
+ * Matches VHDL generic MIN_PERIOD_CNT_G default of 6.
+ * Periods 1..5 are "flat-lined": the toggle FF is held high so the channel
+ * level can still be modulated (AM technique) without ultrasonic aliasing.
+ */
+#define SN76489_MIN_PERIOD  6
+
 /* --------------------------------------------------------------------------
  * Internal: clock one channel by one base-rate tick.
- * Returns the channel output (+1 or -1).
  * -------------------------------------------------------------------------- */
 static inline void tick_tone(sn76489_channel_t *ch)
 {
-    if (ch->tone == 0 || ch->tone == 1) {
-        /* Silence / very high frequency: keep output high */
+    /* period=0: maximum period (counter wraps 0→0xFFFF); let it run. */
+    if (ch->tone > 0 && ch->tone < SN76489_MIN_PERIOD) {
+        /* Flat-line: hold output high, AM modulation still works via volume */
         ch->output = 1;
         return;
     }
