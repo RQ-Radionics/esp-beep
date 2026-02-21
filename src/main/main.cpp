@@ -38,6 +38,7 @@
 #include "esp_system.h"
 #include "esp_log.h"
 #include "driver/spi_master.h"
+#include "esp_task_wdt.h"
 #include "esp_vfs_fat.h"
 #include "sdmmc_cmd.h"
 #include "driver/sdmmc_host.h"
@@ -55,7 +56,11 @@ static const char *TAG_SD   = "sd";
 /* -----------------------------------------------------------------------
  * Back-buffer dimensions
  * ----------------------------------------------------------------------- */
-#define BBC_BUF_W   320
+/* Back-buffer matches VGA width exactly (640 pixels).
+ * bbc_video renders directly at 640×256 — no horizontal doubling needed
+ * in draw_scanline.  Teletext (Mode 7) needs 40 cols × 12px = 480 ≤ 640;
+ * bitmap modes need up to 640px at 2MHz clock — both fit. */
+#define BBC_BUF_W   640
 #define BBC_BUF_H   256
 
 /* -----------------------------------------------------------------------
@@ -379,19 +384,34 @@ static bbc_machine_t *machine = nullptr;
 /* -----------------------------------------------------------------------
  * VGADirectController draw-scanline callback (IRAM, Core 1 ISR context)
  * ----------------------------------------------------------------------- */
+/* VGA is 640×480.  BBC back-buffer is 640×256 (1:1 horizontally).
+ * Vertical mapping: 256 BBC rows → 480 VGA lines.
+ *   BBC row = scanLine * 256 / 480  (nearest-neighbour scaling)
+ * No horizontal doubling needed — bbc_video renders at full 640px width.
+ *
+ * Mode 7 (Teletext): render_teletext_frame() centres content horizontally.
+ *   40 cols × 12 px = 480 px content, x_offset = (640-480)/2 = 80 px.
+ *   x_offset must be a multiple of 4 so the I2S swizzle lands on aligned
+ *   word boundaries — 80 is divisible by 4, so no sub-word pixel reorder.
+ *
+ * I2S LCD mode serialises 32-bit words as [byte2, byte3, byte0, byte1].
+ * Writing dest[x ^ 2] compensates: the hardware re-orders back to [0,1,2,3]
+ * at the output pins.  x_offset being a multiple of 4 keeps groups aligned.
+ */
 static void IRAM_ATTR draw_scanline(void * /*arg*/, uint8_t *dest, int scanLine)
 {
-    int bbc_row = scanLine >> 1;
-    if (bbc_row >= BBC_BUF_H || !s_backbuf) {
-        memset(dest, s_sig[0], BBC_BUF_W * 2);
+    if (!s_backbuf) {
+        memset(dest, s_sig[0], 640);
         return;
     }
 
+    /* Scale 480 VGA lines → 256 BBC rows (nearest-neighbour) */
+    int bbc_row = scanLine * BBC_BUF_H / 480;
+    if (bbc_row >= BBC_BUF_H) bbc_row = BBC_BUF_H - 1;
+
     const uint8_t *src = s_backbuf + bbc_row * BBC_BUF_W;
-    for (int x = 0; x < BBC_BUF_W; x++) {
-        uint8_t v = s_sig[src[x] & 7];
-        dest[x * 2    ] = v;
-        dest[x * 2 + 1] = v;
+    for (int x = 0; x < 640; x++) {
+        dest[x ^ 2] = s_sig[src[x] & 7];
     }
 }
 
@@ -440,11 +460,13 @@ static void audioTask(void *arg)
     printf("[audio] audio started at %lu Hz\n",
            (unsigned long)sn76489_audio_sample_rate());
 
+    /* Each buffer is 256 samples @ 22050 Hz ≈ 11.6 ms.  Delay after each
+     * push so IDLE1 always gets CPU time regardless of whether
+     * xQueueReceive blocked or returned immediately. */
     while (true) {
         if (machine)
             sn76489_audio_push(&machine->psg);
-        else
-            vTaskDelay(1);
+        vTaskDelay(pdMS_TO_TICKS(11));
     }
 }
 
@@ -495,9 +517,40 @@ extern "C" void app_main(void)
                 BOARD_VGA_B1,    BOARD_VGA_B0,
                 BOARD_VGA_HSYNC, BOARD_VGA_VSYNC);
 
-    s_vga.setResolution(VGA_640x480_60Hz);
+    /* --- Back-buffer in PSRAM ------------------------------------------- */
+    s_backbuf = (uint8_t *)heap_caps_malloc(
+        BBC_BUF_H * BBC_BUF_W, MALLOC_CAP_SPIRAM);
+    if (!s_backbuf) {
+        printf("[main] back-buffer alloc failed — need PSRAM\n");
+        return;
+    }
+    memset(s_backbuf, 0, BBC_BUF_H * BBC_BUF_W);
+
     s_vga.setDrawScanlineCallback(draw_scanline, nullptr);
 
+    /* setResolution() → startGPIOStream() → rtc_clk_apll_coeff_set() contains
+     * a bare spin-wait on APLL hardware calibration (esp_rom_delay_us in ROM)
+     * that holds CPU 0 long enough to starve IDLE0 and trigger the TWDT.
+     * Temporarily raise the timeout to 30 s for this one-time init call, then
+     * restore the configured value immediately after. */
+    {
+        esp_task_wdt_config_t twdt_long = {
+            .timeout_ms     = 30000,
+            .idle_core_mask = (1 << 0) | (1 << 1),
+            .trigger_panic  = false,
+        };
+        esp_task_wdt_reconfigure(&twdt_long);
+        s_vga.setResolution(VGA_640x480_60Hz);
+        esp_task_wdt_config_t twdt_normal = {
+            .timeout_ms     = CONFIG_ESP_TASK_WDT_TIMEOUT_S * 1000,
+            .idle_core_mask = (1 << 0) | (1 << 1),
+            .trigger_panic  = false,
+        };
+        esp_task_wdt_reconfigure(&twdt_normal);
+    }
+
+    /* createRawPixel() uses m_HVSync which is set inside setResolution().
+     * Must be called AFTER setResolution() or all pixels get sync=0. */
     for (int i = 0; i < 8; i++)
         s_sig[i] = s_vga.createRawPixel(s_bbc_palette[i]);
 
@@ -507,15 +560,6 @@ extern "C" void app_main(void)
     s_ps2.begin(BOARD_PS2_KBD_CLK, BOARD_PS2_KBD_DATA);
     printf("[kbd] PS/2 controller on CLK=%d DATA=%d\n",
            (int)BOARD_PS2_KBD_CLK, (int)BOARD_PS2_KBD_DATA);
-
-    /* --- Back-buffer in PSRAM ------------------------------------------- */
-    s_backbuf = (uint8_t *)heap_caps_malloc(
-        BBC_BUF_H * BBC_BUF_W, MALLOC_CAP_SPIRAM);
-    if (!s_backbuf) {
-        printf("[main] back-buffer alloc failed — need PSRAM\n");
-        return;
-    }
-    memset(s_backbuf, 0, BBC_BUF_H * BBC_BUF_W);
 
     /* --- Machine alloc in PSRAM ----------------------------------------- */
     machine = (bbc_machine_t *)heap_caps_malloc(
@@ -546,7 +590,10 @@ extern "C" void app_main(void)
            (unsigned long)heap_caps_get_free_size(MALLOC_CAP_SPIRAM));
 
     printf("[main] starting tasks\n");
-    xTaskCreatePinnedToCore(audioTask,    "audio", 4096, NULL, 10, NULL, 1);
+    /* Priority 2: above IDLE (0) and timer daemon (1) but below everything
+     * else.  Audio latency is guaranteed by DMA — the task just needs to
+     * refill buffers before the DAC starves, not run at high priority. */
+    xTaskCreatePinnedToCore(audioTask,    "audio", 4096, NULL,  2, NULL, 1);
     xTaskCreatePinnedToCore(keyboardTask, "kbd",   2048, NULL,  8, NULL, 1);
     xTaskCreatePinnedToCore(emulatorTask, "emu",   8192, NULL,  5, NULL, 0);
 }

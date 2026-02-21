@@ -286,7 +286,18 @@ static void render_teletext_frame(bbc_video_t *video)
     uint8_t *fb = (uint8_t *)video->output.framebuffer;
     uint32_t stride = video->output.fb_stride;
     bbc_fb_format_t fmt = video->output.format;
-    int total_scanlines = SAA5050_ROWS * SAA5050_SCANLINES_PER_ROW;
+
+    /* SAA5050 output: 40 cols × 12 px = 480 px wide, 25 rows × 20 sl = 500 sl tall.
+     * Centre horizontally in the framebuffer (typically 640 px wide).
+     * Map 500 logical scanlines → output height (typically 256), clamped. */
+    int content_w  = SAA5050_COLS * SAA5050_PIXELS_PER_CHAR; /* 480 */
+    int x_offset   = ((int)video->output.width - content_w) / 2;
+    if (x_offset < 0) x_offset = 0;
+
+    int total_scanlines = SAA5050_ROWS * SAA5050_SCANLINES_PER_ROW; /* 500 */
+
+    /* Clear framebuffer to background colour (index 0 = black) before rendering */
+    memset(fb, 0, (size_t)stride * video->output.height);
 
     for (int row = 0; row < SAA5050_ROWS; row++) {
         saa5050_start_row(tt, (uint8_t)row);
@@ -309,15 +320,14 @@ static void render_teletext_frame(bbc_video_t *video)
                 uint8_t pixels[SAA5050_PIXELS_PER_CHAR];
                 saa5050_render_char(tt, &ls, code, pixels);
 
-                /* Scale 40 chars × 12 pixels = 480 → output width */
-                int base_x = col * (int)video->output.width / SAA5050_COLS;
-                int next_x = (col + 1) * (int)video->output.width / SAA5050_COLS;
-                int char_out_w = next_x - base_x;
+                /* Pixel-exact: each character occupies exactly SAA5050_PIXELS_PER_CHAR
+                 * (12) output pixels, placed at x_offset + col * 12. */
+                int base_x = x_offset + col * SAA5050_PIXELS_PER_CHAR;
 
                 for (int px = 0; px < SAA5050_PIXELS_PER_CHAR; px++) {
+                    int fx = base_x + px;
+                    if (fx < 0 || fx >= (int)video->output.width) continue;
                     bbc_rgb_t rgb = bbc_video_ula_colour(ula, pixels[px]);
-                    int fx = base_x + px * char_out_w / SAA5050_PIXELS_PER_CHAR;
-                    if (fx >= (int)video->output.width) break;
                     write_pixel(fb, stride, fx, out_y, rgb, fmt);
                 }
             }
