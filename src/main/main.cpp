@@ -11,10 +11,16 @@
  *   - draw_scanline doubles pixels horizontally (320→640) and vertically
  *     (256→512, centred in 480 VGA lines).
  *
+ * Keyboard: FabGL PS2Controller → BBC Micro keyboard matrix
+ *   - PS/2 on GPIO 33 (CLK) / 32 (DATA) per board.h
+ *   - VirtualKey → (row, col) mapping for BBC Model B layout
+ *   - keyboardTask polls getNextVirtualKey() and calls bbc_machine_key_event()
+ *
  * Task layout:
  *   Core 0  emulatorTask  — BBC Micro main loop (CPU + peripherals)
  *   Core 1  (FabGL ISR)   — VGA scanline DMA (runs autonomously)
  *   Core 1  audioTask     — SN76489 audio rendering
+ *   Core 1  keyboardTask  — PS/2 → BBC matrix events
  */
 
 #include <stdio.h>
@@ -53,9 +59,138 @@ static const fabgl::RGB888 s_bbc_palette[8] = {
 };
 
 /* -----------------------------------------------------------------------
+ * BBC Micro Model B keyboard matrix mapping
+ *
+ * The BBC keyboard is a 10-row × 8-column matrix.
+ * Columns 0-7 are strobed; rows 0-9 are sensed.
+ *
+ * Physical layout (from Acorn BBC Micro Advanced User Guide):
+ *
+ *  row\col  0       1       2       3       4       5       6       7
+ *  0        SHIFT   Q       F0      1       CAPS    SHIFTLK TAB     ESCAPE
+ *  1        CTRL    3       W       2       A       S       Z       (none)
+ *  2        (none)  4       E       R       D       F       X       C
+ *  3        (none)  5       T       6       G       H       V       B
+ *  4        (none)  F4      7       8       Y       J       N       SPACE
+ *  5        (none)  F5      I       O       U       K       M       COMMA
+ *  6        (none)  F6      9       0       P       L       (none)  PERIOD
+ *  7        (none)  F7      MINUS   EQUALS  AT      COLON   SLASH   (none)
+ *  8        F1      F2      F3      BREAK   (none)  UP      (none)  DELETE
+ *  9        (none)  (none)  (none)  COPY    (none)  RIGHT   RETURN  (none)
+ *
+ * (COPY = end-of-line / copy key on BBC; we map it to END)
+ * (AT = '@'; COLON = ':'; BREAK = F12 on PC)
+ *
+ * Encoding: BBC_KEY(row, col) packed as (row<<4)|col — 0xFF = no mapping.
+ * ----------------------------------------------------------------------- */
+#define BBC_KEY(r, c)  (uint8_t)(((r) << 4) | (c))
+#define BBC_NONE       0xFF
+
+/* Lookup table: indexed by VirtualKey enum value.
+ * VK_NONE=0 is not in the table; we check for VK_NONE explicitly.
+ * Size must cover all VK_ values we care about. */
+
+struct BbcKeyPos { uint8_t row; uint8_t col; };
+
+/* Returns {0xFF,0xFF} for no mapping */
+static BbcKeyPos vk_to_bbc(fabgl::VirtualKey vk)
+{
+    using namespace fabgl;
+    switch (vk) {
+    /* Row 0 */
+    case VK_LSHIFT:     case VK_RSHIFT:     return {0, 0};
+    case VK_q:          case VK_Q:          return {0, 1};
+    case VK_F10:                            return {0, 2}; /* F0 on BBC */
+    case VK_1:                              return {0, 3};
+    case VK_CAPSLOCK:                       return {0, 4};
+    /* SHIFTLK (shift-lock) — no direct PS/2 equivalent, skip */
+    case VK_TAB:                            return {0, 6};
+    case VK_ESCAPE:                         return {0, 7};
+
+    /* Row 1 */
+    case VK_LCTRL:      case VK_RCTRL:      return {1, 0};
+    case VK_3:                              return {1, 1};
+    case VK_w:          case VK_W:          return {1, 2};
+    case VK_2:                              return {1, 3};
+    case VK_a:          case VK_A:          return {1, 4};
+    case VK_s:          case VK_S:          return {1, 5};
+    case VK_z:          case VK_Z:          return {1, 6};
+
+    /* Row 2 */
+    case VK_4:                              return {2, 1};
+    case VK_e:          case VK_E:          return {2, 2};
+    case VK_r:          case VK_R:          return {2, 3};
+    case VK_d:          case VK_D:          return {2, 4};
+    case VK_f:          case VK_F:          return {2, 5};
+    case VK_x:          case VK_X:          return {2, 6};
+    case VK_c:          case VK_C:          return {2, 7};
+
+    /* Row 3 */
+    case VK_5:                              return {3, 1};
+    case VK_t:          case VK_T:          return {3, 2};
+    case VK_6:                              return {3, 3};
+    case VK_g:          case VK_G:          return {3, 4};
+    case VK_h:          case VK_H:          return {3, 5};
+    case VK_v:          case VK_V:          return {3, 6};
+    case VK_b:          case VK_B:          return {3, 7};
+
+    /* Row 4 */
+    case VK_F4:                             return {4, 1};
+    case VK_7:                              return {4, 2};
+    case VK_8:                              return {4, 3};
+    case VK_y:          case VK_Y:          return {4, 4};
+    case VK_j:          case VK_J:          return {4, 5};
+    case VK_n:          case VK_N:          return {4, 6};
+    case VK_SPACE:                          return {4, 7};
+
+    /* Row 5 */
+    case VK_F5:                             return {5, 1};
+    case VK_i:          case VK_I:          return {5, 2};
+    case VK_o:          case VK_O:          return {5, 3};
+    case VK_u:          case VK_U:          return {5, 4};
+    case VK_k:          case VK_K:          return {5, 5};
+    case VK_m:          case VK_M:          return {5, 6};
+    case VK_COMMA:                          return {5, 7};
+
+    /* Row 6 */
+    case VK_F6:                             return {6, 1};
+    case VK_9:                              return {6, 2};
+    case VK_0:                              return {6, 3};
+    case VK_p:          case VK_P:          return {6, 4};
+    case VK_l:          case VK_L:          return {6, 5};
+    case VK_PERIOD:                         return {6, 7};
+
+    /* Row 7 */
+    case VK_F7:                             return {7, 1};
+    case VK_MINUS:                          return {7, 2};
+    case VK_EQUALS:                         return {7, 3};
+    case VK_AT:                             return {7, 4}; /* '@' = BBC @ key */
+    case VK_COLON:      case VK_SEMICOLON:  return {7, 5}; /* BBC ':'/';' same key */
+    case VK_SLASH:                          return {7, 6};
+
+    /* Row 8 */
+    case VK_F1:                             return {8, 0};
+    case VK_F2:                             return {8, 1};
+    case VK_F3:                             return {8, 2};
+    case VK_F12:                            return {8, 3}; /* BREAK */
+    case VK_UP:         case VK_KP_UP:      return {8, 5};
+    case VK_DELETE:     case VK_BACKSPACE:  return {8, 7};
+
+    /* Row 9 */
+    case VK_END:        case VK_KP_END:     return {9, 3}; /* COPY */
+    case VK_RIGHT:      case VK_KP_RIGHT:   return {9, 5};
+    case VK_RETURN:     case VK_KP_ENTER:   return {9, 6};
+
+    /* Unmapped */
+    default:                                return {0xFF, 0xFF};
+    }
+}
+
+/* -----------------------------------------------------------------------
  * Global objects
  * ----------------------------------------------------------------------- */
 static fabgl::VGADirectController s_vga;
+static fabgl::PS2Controller       s_ps2;
 
 /* Back-buffer in PSRAM: BBC_BUF_H rows × BBC_BUF_W cols, 1 byte/pixel.
  * Written by emulatorTask (Core 0), read by FabGL scanline ISR (Core 1). */
@@ -72,9 +207,7 @@ static bbc_machine_t *machine = nullptr;
  *
  * VGA 640×480@60Hz → 480 scanlines.
  * BBC active area: 256 rows → 512 VGA lines (double-scan).
- * Vertical centering: top offset = (480 - 512) / 2 = -16
- *   → BBC row 0 maps to VGA scanLine 0 (top 16 BBC rows slightly clipped).
- *   Simple mapping: bbc_row = scanLine / 2; blank if out of [0, BBC_BUF_H).
+ * Simple mapping: bbc_row = scanLine / 2; blank if out of [0, BBC_BUF_H).
  * ----------------------------------------------------------------------- */
 static void IRAM_ATTR draw_scanline(void * /*arg*/, uint8_t *dest, int scanLine)
 {
@@ -93,14 +226,38 @@ static void IRAM_ATTR draw_scanline(void * /*arg*/, uint8_t *dest, int scanLine)
 }
 
 /* -----------------------------------------------------------------------
- * frame_cb — called by bbc_video after each full frame is "rendered".
- * In this build bbc_video writes into the INDEX8 framebuffer directly;
- * the draw_scanline ISR reads it on every VGA scanline.
- * Nothing needed here — the ISR reads s_backbuf at its own pace.
+ * frame_cb — no explicit flip needed (single-buffer, ISR reads latest).
  * ----------------------------------------------------------------------- */
 static void on_frame_ready(void * /*ctx*/)
 {
-    /* No explicit flip needed — single-buffer, ISR reads latest data */
+}
+
+/* -----------------------------------------------------------------------
+ * Keyboard task — reads VirtualKeys from FabGL and feeds BBC matrix.
+ * Runs on Core 1.
+ * ----------------------------------------------------------------------- */
+static void keyboardTask(void *arg)
+{
+    (void)arg;
+
+    fabgl::Keyboard *kb = s_ps2.keyboard();
+    if (!kb) {
+        printf("[kbd] no keyboard object — task exiting\n");
+        vTaskDelete(NULL);
+        return;
+    }
+
+    printf("[kbd] PS/2 keyboard task started\n");
+
+    while (true) {
+        fabgl::VirtualKeyItem item;
+        if (kb->getNextVirtualKey(&item, 10 /* ms timeout */)) {
+            if (!machine) continue;
+            BbcKeyPos pos = vk_to_bbc(item.vk);
+            if (pos.row == 0xFF) continue;          /* unmapped key */
+            bbc_machine_key_event(machine, pos.row, pos.col, item.down);
+        }
+    }
 }
 
 /* -----------------------------------------------------------------------
@@ -187,6 +344,15 @@ extern "C" void app_main(void)
 
     printf("[vga] VGADirectController running\n");
 
+    /* --- PS/2 keyboard init --------------------------------------------- */
+    /*
+     * Use explicit GPIO form so we read from board.h.
+     * Only keyboard on port 0; no mouse.
+     */
+    s_ps2.begin(BOARD_PS2_KBD_CLK, BOARD_PS2_KBD_DATA);
+    printf("[kbd] PS/2 controller init on CLK=%d DATA=%d\n",
+           (int)BOARD_PS2_KBD_CLK, (int)BOARD_PS2_KBD_DATA);
+
     /* --- Back-buffer in PSRAM ------------------------------------------- */
     s_backbuf = (uint8_t *)heap_caps_malloc(
         BBC_BUF_H * BBC_BUF_W, MALLOC_CAP_SPIRAM);
@@ -218,5 +384,6 @@ extern "C" void app_main(void)
 
     printf("[main] starting tasks\n");
     xTaskCreatePinnedToCore(audioTask,    "audio", 4096, NULL, 10, NULL, 1);
+    xTaskCreatePinnedToCore(keyboardTask, "kbd",   2048, NULL,  8, NULL, 1);
     xTaskCreatePinnedToCore(emulatorTask, "emu",   8192, NULL,  5, NULL, 0);
 }
