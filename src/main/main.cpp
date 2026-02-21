@@ -495,8 +495,8 @@ extern "C" void app_main(void)
                 BOARD_VGA_B1,    BOARD_VGA_B0,
                 BOARD_VGA_HSYNC, BOARD_VGA_VSYNC);
 
+    s_vga.setDrawScanlineCallback(draw_scanline, nullptr);  /* MUST be before setResolution */
     s_vga.setResolution(VGA_640x480_60Hz);
-    s_vga.setDrawScanlineCallback(draw_scanline, nullptr);
 
     for (int i = 0; i < 8; i++)
         s_sig[i] = s_vga.createRawPixel(s_bbc_palette[i]);
