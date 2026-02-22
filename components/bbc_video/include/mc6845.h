@@ -120,8 +120,12 @@ typedef struct {
     /* Vertical adjust phase */
     bool     in_vadj;       /* True while processing vertical adjust scanlines*/
 
+    /* Interlace / field state */
+    bool     odd_field;       /* Odd field flag (interlace mode)              */
+
     /* Cursor */
-    bool     cursor_on;     /* Cursor visible at current MA/RA               */
+    bool     cursor_on;       /* Cursor visible at current MA/RA             */
+    bool     cursor_line_ff;  /* VHDL cursor_line variable — persists across scanlines */
     uint8_t  cursor_blink_ctr; /* Frame counter for cursor blink             */
     bool     cursor_blink_state; /* Current blink state (true = visible)     */
     uint16_t frame_count;   /* Total frames elapsed                          */
@@ -129,10 +133,6 @@ typedef struct {
     /* Light pen */
     uint16_t lightpen_addr; /* Latched address when light pen strobed        */
     bool     lightpen_latched;
-
-    /* Coincidence flags (mirrors from floooh implementation) */
-    bool     co_htotal, co_hdisp, co_hspos, co_hswidth;
-    bool     co_vtotal, co_vdisp, co_vspos, co_vswidth, co_raster;
 
     /* VSYNC edge callback → connects to System VIA CA1 */
     void (*vsync_cb)(void *ctx, bool state);

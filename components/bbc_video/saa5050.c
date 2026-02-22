@@ -161,6 +161,7 @@ void saa5050_reset_frame(saa5050_t *tt)
 
 RENDER_IRAM void saa5050_start_row(saa5050_t *tt, uint8_t row_num)
 {
+    if (row_num >= SAA5050_ROWS) return;  /* silently ignore out-of-range */
     tt->current_row  = row_num;
     tt->double_high1 = false;   /* will be set if \x0D seen during this row */
 }
@@ -354,8 +355,8 @@ void saa5050_toggle_flash(saa5050_t *tt)
 RENDER_IRAM void saa5050_start_scanline(saa5050_t *tt, saa5050_line_state_t *ls,
                                           uint8_t scanline)
 {
-    (void)tt;
-    /* scanline 0-19 → line_counter 0-9 */
+    /* Store raw scanline (0-19) for line_addr calculation in render_char */
+    ls->line_counter = scanline;
 
     ls->fg_colour    = 7;
     ls->bg_colour    = 0;
@@ -375,7 +376,6 @@ RENDER_IRAM void saa5050_start_scanline(saa5050_t *tt, saa5050_line_state_t *ls,
     ls->next_flash        = false;
     ls->next_hold         = false;
     ls->next_double_height = tt->double_high2;
-    (void)scanline;
 }
 
 RENDER_IRAM void saa5050_render_char(saa5050_t *tt, saa5050_line_state_t *ls,
@@ -392,21 +392,20 @@ RENDER_IRAM void saa5050_render_char(saa5050_t *tt, saa5050_line_state_t *ls,
     ls->hold_graphics = ls->next_hold;
     ls->double_height = ls->next_double_height;
 
-    /* line_counter from current_scanline (scanline 0-19 → 0-9) */
-    uint8_t lc = (uint8_t)(tt->current_row); /* abuse: caller sets current_row to scanline */
-    /* Actually current_scanline is stored nowhere in the new struct.
-     * Use the ls->double_height and a simplified line_addr calculation.
-     * The tick path passes scanline as the second arg of start_scanline.
-     * We stored it nowhere. Let's use ls->double_height to pick the half. */
-    /* Reconstruct line_counter from the scanline stored in tt.
-     * Since we don't store scanline in the new tt, we use a workaround:
-     * bbc_video_tick passes scanline to start_scanline. We ignore it here
-     * and assume a single scanline = line_counter 0. The tick path is
-     * low-priority; prefer the render_line path. */
-    lc = 0;
+    /* Use scanline stored by saa5050_start_scanline (0-19) */
+    uint8_t sc = ls->line_counter;  /* raw scanline 0-19 */
 
-    bool dh2     = tt->double_high2;
-    uint8_t la   = dh2 ? 5 : 0; /* simplified: top half row 0 only */
+    bool dh2 = tt->double_high2;
+    uint8_t la;
+    if (dh2) {
+        /* DH bottom half: line_addr = (scanline/2)+5, clamped to 0-9 */
+        la = (uint8_t)((sc >> 1) + 5);
+        if (la > 9) la = 9;
+    } else {
+        /* Normal: line_addr = scanline/2 */
+        la = (uint8_t)(sc >> 1);
+        if (la > 9) la = 9;
+    }
 
     bool is_ctrl = (char_code < 0x20);
 
@@ -456,7 +455,7 @@ RENDER_IRAM void saa5050_render_char(saa5050_t *tt, saa5050_line_state_t *ls,
                       ? (uint8_t)(char_code - 0x20) : 0;
         const uint8_t *row_data = tt->char_rom + idx * (10 * 6) + la * 6;
         for (int i = 0; i < 6; i++) raw[i] = row_data[i];
-        if (ls->graphics_mode) ls->held_char = 0x20;
+        if (ls->graphics_mode) { ls->held_char = 0x20; ls->held_is_gfx = false; }
     }
 
     uint8_t eff_fg = ls->fg_colour;
@@ -467,5 +466,4 @@ RENDER_IRAM void saa5050_render_char(saa5050_t *tt, saa5050_line_state_t *ls,
         out_pixels[i * 2]     = c;
         out_pixels[i * 2 + 1] = c;
     }
-    (void)lc;
 }

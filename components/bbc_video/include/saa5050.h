@@ -135,6 +135,8 @@ typedef struct {
     bool     next_flash;
     bool     next_hold;
     bool     next_double_height;
+    /* Scanline tracking for line_addr calculation */
+    uint8_t  line_counter;   /* raw scanline 0-19 from saa5050_start_scanline */
 } saa5050_line_state_t;
 
 void saa5050_start_scanline(saa5050_t *tt, saa5050_line_state_t *ls,
