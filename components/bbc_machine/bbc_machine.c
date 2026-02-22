@@ -62,9 +62,11 @@ static void     io_romsel_write  (uint16_t addr, uint8_t val, void *ctx);
  * IRQ helpers
  * ====================================================================== */
 
-/* Recalculate the CPU /IRQ line from all sources */
+/* Recalculate the CPU /IRQ line from all sources.
+ * All IRQ sources (sysvia, uservia, ACIA) share the same /IRQ line.
+ * The line is asserted (low) if ANY source is active. */
 static void update_irq(bbc_machine_t *m) {
-    if (m->irq.sysvia || m->irq.uservia) {
+    if (m->irq.sysvia || m->irq.uservia || m->irq.acia) {
         bbc_cpu_irq(m->cpu);
     } else {
         bbc_cpu_clear_irq(m->cpu);
@@ -217,10 +219,14 @@ void bbc_machine_reset(bbc_machine_t *m) {
 
     m->irq.sysvia  = false;
     m->irq.uservia = false;
+    m->irq.acia    = false;
     m->cycle_acc   = 0;
 
     if (m->fb_output) {
         bbc_video_set_output(&m->video, m->fb_output);
+    }
+    if (m->on_frame) {
+        bbc_video_set_frame_callback(&m->video, m->on_frame, m->on_frame_ctx);
     }
     if (m->on_frame) {
         bbc_video_set_frame_callback(&m->video, m->on_frame, m->on_frame_ctx);
@@ -263,6 +269,7 @@ void bbc_machine_break(bbc_machine_t *m, bool shift_held) {
 
     m->irq.sysvia  = false;
     m->irq.uservia = false;
+    m->irq.acia    = false;
     m->cycle_acc   = 0;
     m->crtc_acc    = 0;
 
@@ -709,9 +716,11 @@ static void io_serial_ula_write(uint16_t addr, uint8_t val, void *ctx) {
 
 static void tape_irq(void *ctx, bool state) {
     bbc_machine_t *m = (bbc_machine_t *)ctx;
-    /* Tape IRQ shares /IRQ with VIA IRQs */
-    if (state)
-        bbc_cpu_irq(m->cpu);
+    /* ACIA IRQ shares /IRQ line with VIA IRQs.
+     * Track state so update_irq() can properly deassert the line
+     * when no source is active (fixes: VIA clearing IRQ cancelled ACIA). */
+    m->irq.acia = state;
+    update_irq(m);
 }
 
 /* ======================================================================
