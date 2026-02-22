@@ -285,7 +285,13 @@ static uint8_t acia_status(const bbc_tape_t *tape)
 {
     uint8_t s = 0x02;                  /* TDRE always 1 */
     if (tape->rx_full)   s |= 0x01;   /* RDRF */
-    if (!tape->motor_on) s |= 0x04;   /* DCD: 1=no carrier */
+    if (!tape->motor_on) s |= 0x04;   /* DCD: 1=no carrier (motor off) */
+    /* CTS (bit 3): in BBC Micro hardware, the cassette circuit pulls CTS high
+     * when the motor is running and the tape transport is engaged.
+     * The MOS uses CTS=1 (bit3=1) to confirm cassette data is valid (path at
+     * $F5B7: BCC $F61D — skips C2 update when CTS=0).
+     * We assert CTS=1 whenever the motor is on. */
+    if (tape->motor_on)  s |= 0x08;   /* CTS=1: cassette engaged */
     /* IRQ = rx_ie & (rx_full | ovr).  We have no ovr, so just rx_full. */
     if (tape->irq_enabled && tape->rx_full) s |= 0x80;
     return s;
