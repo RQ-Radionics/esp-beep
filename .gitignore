@@ -58,7 +58,11 @@ dkms.conf
 .vscode
 
 # Beads issue tracker
+<<<<<<< HEAD
 .beads
+=======
+/.beads
+>>>>>>> @{-1}
 
 # Host build output
 src/host/bbc-beep
