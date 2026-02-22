@@ -77,6 +77,7 @@ typedef struct {
 typedef struct {
     bool sysvia;
     bool uservia;
+    bool acia;     /* ACIA (tape) IRQ */
 } bbc_irq_state_t;
 
 /* ------------------------------------------------------------------

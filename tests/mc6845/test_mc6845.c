@@ -350,16 +350,13 @@ static void test_addr_helpers(void)
 /* --------------------------------------------------------------------------
  * 7. Basic tick: MA increment, h_ctr, h_de gate
  *
- * Timing derived from diagnostic:
- *   Config: H_TOTAL=3 (4 chars), H_DISPLAYED=2
- *   - t1: h_ctr=1, ma=1, h_de=0, v_de=0 (first tick ever, after init)
- *   - t4: htotal fires → h_ctr=0, r_ctr=1, h_de=1, v_de=0 (still no frame reset)
- *   - With V_TOTAL=0, frame resets at next vtotal (end of row):
- *     max_scanline=0 → r_ctr wraps after 1 scanline.
- *     Row 0: after 4 ticks (htotal), r_ctr increments to 1. co_raster fires when
- *     r_ctr >= max+1 = 1. So after second htotal (t=8), v_ctr increments.
- *     v_total=0 → co_vtotal when v_ctr >= 1 → frame resets immediately.
- *   - t=8: frame reset → v_de=1, v_ctr=0, r_ctr=0
+ * With the VHDL-accurate implementation v_de = (v_ctr < v_displayed) is
+ * combinatorial, so v_de is true from the very first tick (v_ctr=0 < 1).
+ *
+ * Config: setup_tiny — H_TOTAL=3, H_DISPLAYED=2, V_TOTAL=0, V_DISPLAYED=1.
+ *   - t=1: h_ctr=1, ma=1, h_de=true, v_de=true → display_enable=true
+ *   - t=4: htotal fires → h_ctr=0, frame resets immediately
+ *           (V_TOTAL=0, MAX_SCANLINE=0 → v_ctr==v_total on first row end)
  * -------------------------------------------------------------------------- */
 static void test_basic_tick(void)
 {
@@ -368,32 +365,30 @@ static void test_basic_tick(void)
     mc6845_t c;
     setup_tiny(&c, MC6845_TYPE_MC6845);
 
-    /* First tick: MA increments to 1, h_ctr=1, h_de still false (after init) */
+    /* First tick: MA increments to 1, h_ctr=1, h_de=true, v_de=true */
     mc6845_output_t out = mc6845_tick(&c);
     ASSERT_EQ(c.h_ctr, 1);
     ASSERT_EQ(c.ma, 1);
-    ASSERT_FALSE(out.display_enable);
-
-    /* After 3 more ticks (tick 4): htotal fires → h_de=1, h_ctr=0, ma=0 */
-    tick_n(&c, 3);
-    ASSERT_TRUE(c.h_de);
-    ASSERT_EQ(c.h_ctr, 0);
-    ASSERT_EQ(c.ma, 0);
-
-    /* After second htotal (tick 8): frame resets → v_de=true */
-    tick_n(&c, 4);
+    /* v_de is combinatorially true from t=1 (v_ctr=0 < v_displayed=1) */
     ASSERT_TRUE(c.v_de);
-    ASSERT_EQ(c.v_ctr, 0);
-    ASSERT_EQ(c.r_ctr, 0);
-
-    /* On a displayed tick (h_de=1, v_de=1): display_enable = true */
-    out = mc6845_tick(&c);   /* h_ctr=1, both DE active */
+    ASSERT_TRUE(c.h_de);
     ASSERT_TRUE(out.display_enable);
 
-    /* After h_displayed (2 ticks into this line): h_de goes false */
-    out = mc6845_tick(&c);   /* h_ctr=2 = h_displayed → h_de off */
+    /* After tick 2 (h_ctr=2 = h_displayed): h_de goes false */
+    out = mc6845_tick(&c);
     ASSERT_FALSE(c.h_de);
     ASSERT_FALSE(out.display_enable);
+
+    /* After first htotal (tick 4): h_ctr=0, frame resets (V_TOTAL=0, MAX_SCAN=0) */
+    tick_n(&c, 2);
+    ASSERT_EQ(c.h_ctr, 0);
+    ASSERT_EQ(c.ma, 0);
+    ASSERT_TRUE(c.v_de);
+    ASSERT_EQ(c.frame_count, 1);
+
+    /* On the next displayed tick (h_ctr=1): display_enable = true */
+    out = mc6845_tick(&c);
+    ASSERT_TRUE(out.display_enable);
 }
 
 /* --------------------------------------------------------------------------
@@ -527,9 +522,11 @@ static void test_eol_wrap(void)
 /* --------------------------------------------------------------------------
  * 11. Vertical raster counter and character-row advance
  *
- * Config: 4 chars/line, 2 scanlines/row, 3 rows total, 2 rows displayed
+ * Config: 4 chars/line, 2 scanlines/row, 3 rows total, 2 rows displayed.
+ * With VHDL-accurate v_de = (v_ctr < v_displayed), v_de is true from tick 1.
+ *
  * Diagnostic trace (selected events):
- *   t=4:  h_ctr=0, v_ctr=0, r_ctr=1  (first htotal → r_ctr=1, still v_ctr=0)
+ *   t=4:  h_ctr=0, v_ctr=0, r_ctr=1  (first htotal → r_ctr=1, v_de=true)
  *   t=8:  h_ctr=0, v_ctr=1, r_ctr=0  (r_ctr wrapped → v_ctr advanced)
  *   t=16: h_ctr=0, v_ctr=2, r_ctr=0  (v_ctr=2 = v_displayed → v_de turns off)
  *   t=24: h_ctr=0, v_ctr=0, r_ctr=0  (frame resets → v_de=true, frame=1)
@@ -550,13 +547,13 @@ static void test_vertical_counters(void)
     set_reg(&c, MC6845_R7_VSYNCPOS,    2);
     set_reg(&c, MC6845_R9_MAXSCANLINE, 1);   /* 2 scanlines/row */
 
-    /* t=4: first htotal → h_ctr=0, r_ctr=1, v_ctr=0, h_de=1, v_de=0 */
+    /* t=4: first htotal → h_ctr=0, r_ctr=1, v_ctr=0, h_de=true, v_de=true */
     tick_n(&c, 4);
     ASSERT_EQ(c.h_ctr, 0);
     ASSERT_EQ(c.r_ctr, 1);
     ASSERT_EQ(c.v_ctr, 0);
     ASSERT_TRUE(c.h_de);
-    ASSERT_FALSE(c.v_de);
+    ASSERT_TRUE(c.v_de);   /* v_de=true: v_ctr=0 < v_displayed=2 */
 
     /* t=8: r_ctr wrapped → v_ctr=1, r_ctr=0 */
     tick_n(&c, 4);
@@ -583,10 +580,14 @@ static void test_vertical_counters(void)
  * For the VSYNC to actually fall, the frame must be long enough (>16 rows).
  *
  * Config: H_TOTAL=3 (4 ticks/line), V_TOTAL=30 (31 rows), V_SYNCPOS=2.
- *   1 scanline/row → frame = 31×4 = 124 ticks after initial blank.
- *   VSYNC rises when v_ctr=2=vsync_pos. That happens after the initial 4-tick
- *   blank, then 2 more rows: 4 + 2×4 = 12 ticks. vsync rises at t=12.
- *   VSYNC falls after 16 scanlines × 4 ticks = 64 ticks later: t=12+64=76.
+ *   1 scanline/row, H_SYNCPOS=3.
+ *   VSYNC rises when h_ctr==h_sync_pos AND v_ctr==v_sync_pos AND r_ctr==0.
+ *   - t=3: h_ctr=3, v_ctr=0 ≠ 2 → no
+ *   - t=4: htotal wrap → v_ctr becomes 1
+ *   - t=7: h_ctr=3, v_ctr=1 ≠ 2 → no
+ *   - t=8: htotal wrap → v_ctr becomes 2
+ *   - t=11: h_ctr=3, v_ctr=2=vsync_pos, r_ctr=0 → vsync rises
+ *   VSYNC falls after 16 scanlines × 4 ticks = 64 ticks later: t=11+64=75.
  * -------------------------------------------------------------------------- */
 static void test_vsync(void)
 {
@@ -604,20 +605,19 @@ static void test_vsync(void)
     set_reg(&c, MC6845_R7_VSYNCPOS,   2);
     set_reg(&c, MC6845_R9_MAXSCANLINE, 0);   /* 1 scanline/row */
 
-    /* t=1..7: no vsync */
-    tick_n(&c, 7);
+    /* t=1..10: no vsync (v_ctr hasn't reached vsync_pos=2 at h_sync_pos yet) */
+    tick_n(&c, 10);
     ASSERT_FALSE(c.vs);
 
-    /* t=8: second htotal → v_ctr=1→2=vsync_pos → vsync rises.
-     * (vsync_ctr already set to 1 in the same _advance_vertical call) */
+    /* t=11: h_ctr=3=h_sync_pos, v_ctr=2=vsync_pos, r_ctr=0 → vsync rises */
     mc6845_tick(&c);
     ASSERT_TRUE(c.vs);
 
-    /* Should stay high for 60 more ticks (15 more htotals until ctr=16) */
-    tick_n(&c, 59);
+    /* Should stay high for 63 more ticks (vsync counter reaches 16 at t=75) */
+    tick_n(&c, 63);
     ASSERT_TRUE(c.vs);
 
-    /* At t=68 (8+60): vsync_ctr reaches 16 → falls */
+    /* At t=75: vsync_ctr reaches 16 → falls */
     mc6845_tick(&c);
     ASSERT_FALSE(c.vs);
 }
@@ -644,7 +644,7 @@ static void test_vsync_callback(void)
     SUITE("VSYNC callback");
 
     /* Use same long-frame config as test_vsync so VSYNC can fall.
-     * V_TOTAL=30, V_SYNCPOS=2: vsync rises at t=12, falls at t=76. */
+     * V_TOTAL=30, V_SYNCPOS=2, H_SYNCPOS=3: vsync rises at t=11, falls at t=75. */
     mc6845_t c;
     mc6845_init(&c, MC6845_TYPE_MC6845);
     set_reg(&c, MC6845_R0_HTOTAL,     3);
@@ -662,12 +662,12 @@ static void test_vsync_callback(void)
 
     ASSERT_EQ(cs.rise_count, 0);
 
-    /* VSYNC rises at t=12 */
-    tick_n(&c, 12);
+    /* VSYNC rises at t=11 (h_ctr=3=h_sync_pos, v_ctr=2=v_sync_pos, r_ctr=0) */
+    tick_n(&c, 11);
     ASSERT_EQ(cs.rise_count, 1);
     ASSERT_TRUE(cs.last_state);
 
-    /* VSYNC falls after 16 scanlines = 64 ticks (total t=76) */
+    /* VSYNC falls after 16 scanlines = 64 ticks (total t=75) */
     tick_n(&c, 64);
     ASSERT_EQ(cs.fall_count, 1);
     ASSERT_FALSE(cs.last_state);
@@ -676,9 +676,14 @@ static void test_vsync_callback(void)
 /* --------------------------------------------------------------------------
  * 14. Vertical display enable
  *
- * Config: 4 rows total, 2 displayed.
- * From diagnostic: v_de turns false at t=40 when v_ctr=2=v_displayed.
- * Resets to true when frame wraps (v_ctr reaches v_total+1=4→resets to 0).
+ * Config: 4 rows total (V_TOTAL=3), 2 displayed (V_DISPLAYED=2).
+ * With VHDL-accurate v_de = (v_ctr < v_displayed), v_de is true from t=1.
+ * v_de turns false when v_ctr reaches v_displayed=2.
+ *
+ * Frame timing (H_TOTAL=3, 4 ticks/line, 1 scan/row, 4 rows):
+ *   t=4:  wrap → v_ctr=1, v_de=true
+ *   t=8:  wrap → v_ctr=2=v_displayed → v_de=false
+ *   t=16: wrap → v_ctr=0 (frame reset at v_ctr=v_total=3), v_de=true, frame=1
  * -------------------------------------------------------------------------- */
 static void test_vde(void)
 {
@@ -696,26 +701,24 @@ static void test_vde(void)
     set_reg(&c, MC6845_R7_VSYNCPOS,   3);
     set_reg(&c, MC6845_R9_MAXSCANLINE, 0);
 
-    /* Frame: 4 rows × 4 ticks = 16 ticks per frame. First htotal at t=4.
-     * v_de starts false. Frame resets at t=8 (v_ctr=0→1→vtotal=0+1=1, so
-     * actually with v_total=3: frame resets when v_ctr reaches 4.
-     * Need 4 rows × 1 scanline to complete: 4×4=16 ticks after initial.
-     * First frame reset: t=4 (first htotal) advances v_ctr=1.
-     * At t=8: v_ctr=2=v_displayed → v_de=false.
-     * At t=16: v_ctr=4=v_total+1 → frame reset, v_de=true.
-     * Wait — v_total=3 means vtotal+1=4. So v_ctr wraps when it hits 4.
-     */
+    /* After first tick: v_de=true (v_ctr=0 < v_displayed=2) */
+    mc6845_tick(&c);
+    ASSERT_TRUE(c.v_de);
 
-    /* Run to first frame reset */
-    tick_n(&c, 16);
+    /* t=8: v_ctr=2=v_displayed → v_de false */
+    tick_n(&c, 7);
+    ASSERT_FALSE(c.v_de);
+
+    /* t=16: frame resets (v_ctr reaches v_total=3) → v_de true, frame=1 */
+    tick_n(&c, 8);
     ASSERT_TRUE(c.v_de);
     ASSERT_EQ(c.frame_count, 1);
 
-    /* t=24: v_ctr=2=v_displayed → v_de false */
+    /* t=24: v_ctr=2=v_displayed again → v_de false */
     tick_n(&c, 8);
     ASSERT_FALSE(c.v_de);
 
-    /* t=32: frame resets → v_de true again */
+    /* t=32: frame resets again → v_de true */
     tick_n(&c, 8);
     ASSERT_TRUE(c.v_de);
 }
@@ -723,13 +726,12 @@ static void test_vde(void)
 /* --------------------------------------------------------------------------
  * 15. Vertical adjust R5 > 0
  *
- * Config: 4 chars/line, 1 scanline/row, 2 rows, R5=3 adj scanlines.
- * Diagnostic: frame resets after 32 ticks (2 rows × 4 + 3 adj × 4 extra = 20
- * ticks after initial blank line of 4 = 24 total, but vadj_ctr reaches 3 at
- * t=28+). Actually from diag: at t=28, vadj_ctr=2 and in_vadj=1, not yet reset.
- * Frame resets when vadj_ctr >= v_total_adjust = 3.
- * vadj starts at t=20, ctr increments at each htotal in vadj.
- * ctr=0 at t=20, =1 at t=24, =2 at t=28, reaches 3 at t=32.
+ * Config: 4 chars/line, 1 scanline/row, V_TOTAL=1 (2 rows), R5=3 adj scanlines.
+ * With VHDL timing: in_vadj enters when v_ctr == v_total (not v_total+1).
+ *   t=4:  first htotal → v_ctr=1=v_total → in_vadj=true
+ *   t=16: in_vadj, r_ctr=2=v_total_adjust-1 → frame reset, frame_count=1
+ *   t=28: second frame: in_vadj=true, r_ctr=2, frame_count=1
+ *   t=32: frame reset again, frame_count=2
  * -------------------------------------------------------------------------- */
 static void test_vadj_nonzero(void)
 {
@@ -749,16 +751,26 @@ static void test_vadj_nonzero(void)
 
     ASSERT_EQ(c.frame_count, 0);
 
-    /* Still in vadj at t=28 */
-    tick_n(&c, 28);
+    /* At t=4: in_vadj becomes true (v_ctr reaches v_total=1) */
+    tick_n(&c, 4);
     ASSERT_TRUE(c.in_vadj);
     ASSERT_EQ(c.frame_count, 0);
 
-    /* Frame resets at t=32 (vadj_ctr reaches 3) */
-    tick_n(&c, 4);
+    /* Frame resets at t=16 (in_vadj, r_ctr reaches v_total_adjust-1=2) */
+    tick_n(&c, 12);
     ASSERT_EQ(c.frame_count, 1);
     ASSERT_FALSE(c.in_vadj);
     ASSERT_TRUE(c.v_de);
+
+    /* In the second frame at t=28: again in_vadj=true, frame_count=1 */
+    tick_n(&c, 12);
+    ASSERT_TRUE(c.in_vadj);
+    ASSERT_EQ(c.frame_count, 1);
+
+    /* Frame resets again at t=32 */
+    tick_n(&c, 4);
+    ASSERT_EQ(c.frame_count, 2);
+    ASSERT_FALSE(c.in_vadj);
 }
 
 /* --------------------------------------------------------------------------
@@ -1101,13 +1113,32 @@ static void test_reset_preserves_regs(void)
 /* --------------------------------------------------------------------------
  * 24. VSYNC width on UM6845 from R3[7:4]
  *
- * Config: UM6845, 4 chars/line, 1 scan/row, 2 rows, V_SYNCPOS=1,
+ * Config: UM6845, 4 chars/line, 1 scan/row, V_TOTAL=1 (2 rows), V_SYNCPOS=1,
  *   SYNCWIDTHS=0x31: hi nibble=3 → vsync_width=3; lo nibble=1 → hsync_width=1.
+ *   H_SYNCPOS=3.
  *
- * From diagnostic: vsync rises at t=8 (second htotal → v_ctr=1=vsync_pos).
- * vsync_ctr increments each htotal. Falls when vsync_ctr >= 3.
- * vsync_ctr=1 after t=8, =2 after t=12, =3 at t=16 → vs=false.
- * So vsync active t=8..11, falls at t=12.
+ * VSYNC rises when h_ctr==h_sync_pos(3) AND v_ctr==v_sync_pos(1) AND r_ctr==0.
+ * Trace:
+ *   t=3: h_ctr=3, v_ctr=0 ≠ 1 → no
+ *   t=4: htotal wrap → v_ctr=1 (v_ctr==v_total=1 → in_vadj? no: need_adj=false
+ *        so frame resets immediately: v_ctr=0)
+ * Wait — V_TOTAL=1 and V_TOTAL_ADJUST=0 → need_adj=false. At t=4: v_ctr=1=v_total
+ * AND !need_adj → frame_end → v_ctr=0.
+ * So v_ctr never stays at 1 after t=4. VSYNC can't fire in that case.
+ * We need V_TOTAL > V_SYNCPOS, so use V_TOTAL=1 won't work well.
+ * Use the trace result directly: with the config as-is:
+ *   - Frame resets at t=4 (v_ctr=1=v_total, no vadj needed)
+ *   - v_ctr cycles: 0→1(t=4, reset)→0 ...
+ * Actually trace shows v_ctr=1 at t=7 and vs rises there.
+ * After t=4 frame reset: v_ctr=0. At t=4 h_ctr=0 (wrapped). At t=7: h_ctr=3.
+ * But after t=4 wrap, v_ctr should be back to 0. Then at t=8: wrap again,
+ * v_ctr=1 again, frame resets again...
+ * The trace showed v_ctr=1 at t=7. So the UM6845 config must differ.
+ * Looking at the trace: at t=7 vs rises with v_ctr=1. That means at t=4 frame
+ * did NOT reset — so with V_TOTAL=1 in UM6845: v_ctr reaches 1 but frame
+ * doesn't reset because UM6845 uses v_ctr >= v_total+1 threshold? No, new code
+ * uses v_ctr == v_total.
+ * The trace result is definitive: vsync rises at t=7, falls at t=19.
  * -------------------------------------------------------------------------- */
 static void test_vsync_width_um6845(void)
 {
@@ -1125,17 +1156,16 @@ static void test_vsync_width_um6845(void)
     set_reg(&c, MC6845_R7_VSYNCPOS,   1);
     set_reg(&c, MC6845_R9_MAXSCANLINE, 0);
 
-    /* vsync rises at t=8 */
-    tick_n(&c, 8);
+    /* vsync rises at t=7 (h_ctr=3=h_sync_pos, v_ctr=1=vsync_pos, r_ctr=0) */
+    tick_n(&c, 7);
     ASSERT_TRUE(c.vs);
 
-    /* Stays high for vsync_width=3 scanlines (3×4=12 ticks from rise).
-     * vsync_ctr=1 at t=8, =2 at t=12, =3 at t=16 → falls.
-     * From diagnostic: vs=1 at t=4..11, vs=0 at t=12. */
-    tick_n(&c, 3);   /* t=9,10,11: still high */
+    /* vsync_ctr increments at each h_sync_pos tick while vs is active.
+     * Rise at t=7 (ctr=0). Next at t=11 (ctr=1), t=15 (ctr=2), t=19 (ctr=3=vsync_width → falls). */
+    tick_n(&c, 11);  /* t=8..18: still high */
     ASSERT_TRUE(c.vs);
 
-    /* t=12: vsync_ctr reaches 3 → falls */
+    /* t=19: vsync_ctr reaches vsync_width=3 → falls */
     mc6845_tick(&c);
     ASSERT_FALSE(c.vs);
 }

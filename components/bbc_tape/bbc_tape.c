@@ -189,14 +189,22 @@ int bbc_tape_load_uef(bbc_tape_t *tape, const char *path)
     tape->uef_data = uef_data;
     tape->uef_size = uef_size;
 
-    /* Count valid 0x0100 chunks (len >= 2 = at least sync + 1 byte) */
+    /* Count valid blocks:
+     *   0x0100 data chunks (len >= 2 = at least sync + 1 byte)
+     *   0x0110 carrier tone chunks (synthesised as $DC bytes) */
     uint16_t n = 0;
     size_t pos = 12;
     while (pos + 6 <= tape->uef_size) {
         uint16_t chunk_id  = read_u16le(tape->uef_data + pos);
         uint32_t chunk_len = read_u32le(tape->uef_data + pos + 2);
         pos += 6;
-        if (chunk_id == UEF_CHUNK_DATA && chunk_len >= 2) n++;
+        if (chunk_id == UEF_CHUNK_DATA && chunk_len >= 2) {
+            n++;
+        } else if (chunk_id == UEF_CHUNK_CARRIER && chunk_len >= 2) {
+            /* Each carrier chunk becomes one synthetic carrier block */
+            uint16_t cycles = read_u16le(tape->uef_data + pos);
+            if (cycles / 20 >= 1) n++;  /* at least 1 byte worth */
+        }
         if (pos + chunk_len > tape->uef_size) break;
         pos += chunk_len;
     }
@@ -224,12 +232,23 @@ int bbc_tape_load_uef(bbc_tape_t *tape, const char *path)
             memcpy(tape->blocks[bi].data, tape->uef_data + pos, blen);
             tape->blocks[bi].len = blen;
             bi++;
+        } else if (chunk_id == UEF_CHUNK_CARRIER && chunk_len >= 2) {
+            uint16_t cycles = read_u16le(tape->uef_data + pos);
+            uint16_t nbytes = (uint16_t)(cycles / 20);
+            if (nbytes >= 1) {
+                if (nbytes > BBC_TAPE_BLOCK_MAX) nbytes = BBC_TAPE_BLOCK_MAX;
+                memset(tape->blocks[bi].data, 0xDC, nbytes);
+                tape->blocks[bi].len = nbytes;
+                tape->blocks[bi].is_carrier = true;
+                TAPE_LOGI("carrier tone: %u cycles -> %u bytes $DC", cycles, nbytes);
+                bi++;
+            }
         }
         if (pos + chunk_len > tape->uef_size) break;
         pos += chunk_len;
     }
 
-    TAPE_LOGI("loaded %s: %d tape blocks", path, n);
+    TAPE_LOGI("loaded %s: %d tape blocks (data+carrier)", path, n);
     return 0;
 }
 
@@ -252,32 +271,61 @@ void bbc_tape_set_motor(bbc_tape_t *tape, bool on)
     tape->motor_on = on;
     TAPE_LOGI("motor %s", on ? "ON" : "OFF");
     if (on) {
-        /* Give the MOS ~200ms to configure the ACIA before first byte arrives.
-         * 200ms * 2MHz = 400000 cycles delay. */
-        tape->cycle_acc = -400000;
-        tape->rx_full   = false;
-        tape->running   = true;
+        /* Give the MOS ~200ms to configure the ACIA before first byte arrives
+         * on the first motor-on.  Subsequent motor-on (motor toggle) uses a
+         * shorter re-engage delay (one byte period) so the stream resumes
+         * promptly without discarding already-latched bytes.
+         * Skipped entirely in test mode (no_motor_delay). */
+        if (!tape->running) {
+            tape->cycle_acc = tape->no_motor_delay ? 0 : -400000;
+        } else {
+            /* Already ran before — just a brief re-engage delay */
+            tape->cycle_acc = tape->no_motor_delay ? 0 : -CYCLES_PER_BYTE;
+        }
+        tape->running = true;
+        /* Do NOT reset rx_full here: a byte latched while motor was briefly
+         * off should still be available to the MOS on motor-on. */
     }
 }
 
 /* -------------------------------------------------------------------------
- * ACIA status byte — matches MC6850 Verilog:
- *   status = {~irq_n, rx_pe, rx_ovr, rx_fe, cts_n, dcd_n, ~tdr_full, rx_full}
- *   bit 0 = RDRF  (rx_full)
- *   bit 1 = TDRE  (~tdr_full, always 1 for us — we don't transmit)
- *   bit 2 = DCD   (0 = carrier present = motor on; 1 = no carrier)
- *   bit 3 = CTS   (0 = ok)
- *   bit 4 = FE    framing error (always 0)
- *   bit 5 = OVRN  overrun (always 0)
- *   bit 6 = PE    parity error (always 0)
- *   bit 7 = IRQ   (~irq_n) = rx_ie & (rx_full | ovr)
+ * ACIA status byte — BBC Micro MC6850 mapping:
+ *   bit 0 = RDRF  Receive Data Register Full
+ *   bit 1 = TDRE  Transmit Data Register Empty (always 1 — no TX emulated)
+ *   bit 2 = DCD   Data Carrier Detect
+ *   bit 3 = CTS   Clear To Send (always 0 — unused in BBC cassette path)
+ *   bit 4 = FE    Framing Error (always 0)
+ *   bit 5 = OVRN  Overrun (always 0)
+ *   bit 6 = PE    Parity Error (always 0)
+ *   bit 7 = IRQ   = rx_ie & (rx_full | ovr)
+ *
+ * DCD polarity (BBC Micro specific):
+ *   In the BBC Micro cassette circuit, /DCD on the ACIA is driven HIGH
+ *   when the cassette motor is running and carrier is present.  This is
+ *   non-standard: /DCD HIGH = DCD status bit = 1 = carrier detected.
+ *   The MOS uses this at $F5B7 (BCC $F61D): after 3×LSR of status,
+ *   carry = original DCD bit.  BCC exits when carry=0 (no carrier).
+ *   So DCD=1 (motor on) is required for $C2 to advance from 1→2.
+ *
+ *   Summary:  motor ON  → DCD=1 (carrier present, /DCD pin HIGH)
+ *             motor OFF → DCD=0 (no carrier,   /DCD pin LOW)
  * ------------------------------------------------------------------------- */
 static uint8_t acia_status(const bbc_tape_t *tape)
 {
-    uint8_t s = 0x02;                  /* TDRE always 1 */
-    if (tape->rx_full)   s |= 0x01;   /* RDRF */
-    if (!tape->motor_on) s |= 0x04;   /* DCD: 1=no carrier */
-    /* IRQ = rx_ie & (rx_full | ovr).  We have no ovr, so just rx_full. */
+    uint8_t s = 0x02;                 /* TDRE always 1 */
+    if (tape->rx_full)  s |= 0x01;   /* RDRF */
+    /* DCD (bit 2) — BBC Micro cassette-specific:
+     *   The cassette carrier-detect circuit drives /DCD HIGH during the
+     *   carrier tone (leader), giving DCD status bit = 1.
+     *   During actual data bytes (after the leader), /DCD goes LOW,
+     *   giving DCD status bit = 0.
+     *   The MOS uses this at $F5B7/BCC and $F5C0/BCS to distinguish:
+     *     carrier bytes (DCD=1) → C=1 after 3xLSR → advances C2 1→2
+     *     data bytes    (DCD=0) → C=0 after 3xLSR → C2 2→3 via CMP $2A */
+    /* DCD drops when tape ends — no more carrier after last block */
+    bool tape_has_data = tape->blocks && (tape->cur_block < tape->n_blocks || tape->rx_full);
+    if (tape->motor_on && tape->rx_is_carrier && tape_has_data) s |= 0x04;
+    /* IRQ = rx_ie & rx_full */
     if (tape->irq_enabled && tape->rx_full) s |= 0x80;
     return s;
 }
@@ -299,7 +347,7 @@ uint8_t bbc_tape_read(bbc_tape_t *tape, uint8_t reg)
         tape->rx_full = false;
         /* Update IRQ line */
         if (tape->irq_cb) tape->irq_cb(tape->irq_ctx, false);
-        TAPE_LOGI("RX %02X", d);
+        TAPE_LOGD("RX %02X", d);
         return d;
     }
 }
@@ -327,12 +375,12 @@ void bbc_tape_write(bbc_tape_t *tape, uint8_t reg, uint8_t val)
         if ((val & 0x03) == 0x03) {
             tape->rx_full = false;
             if (tape->irq_cb) tape->irq_cb(tape->irq_ctx, false);
-            TAPE_LOGI("ACIA master reset");
+            TAPE_LOGD("ACIA master reset");
         } else if (!old_irq_en && tape->irq_enabled && tape->rx_full) {
             /* IRQ just enabled and byte already waiting — assert IRQ now */
             if (tape->irq_cb) tape->irq_cb(tape->irq_ctx, true);
         }
-        TAPE_LOGI("ACIA ctrl=%02X rx_ie=%d", val, tape->irq_enabled);
+        TAPE_LOGD("ACIA ctrl=%02X rx_ie=%d", val, tape->irq_enabled);
     }
     /* TX data writes ignored (we only emulate RX) */
 }
@@ -346,10 +394,10 @@ void bbc_tape_write(bbc_tape_t *tape, uint8_t reg, uint8_t val)
  * ------------------------------------------------------------------------- */
 void bbc_tape_tick(bbc_tape_t *tape, int cycles)
 {
-    /* Only deliver once the motor has been turned on at least once.
-     * After that, keep streaming even if motor is turned off (relay inertia).
+    /* Only deliver bytes when the motor is running.
+     * We require both running (has been on at least once) and motor_on.
      * The DCD bit in status reflects motor_on; the MOS uses DCD for error detection. */
-    if (!tape->running) return;
+    if (!tape->running || !tape->motor_on) return;
     if (!tape->blocks || tape->cur_block >= tape->n_blocks) return;
     if (tape->rx_full) return;  /* MOS hasn't read the previous byte yet */
 
@@ -359,11 +407,12 @@ void bbc_tape_tick(bbc_tape_t *tape, int cycles)
 
     /* Deliver next byte */
     bbc_tape_block_t *blk = &tape->blocks[tape->cur_block];
-    tape->rx_data = blk->data[tape->cur_pos++];
-    tape->rx_full = true;
+    tape->rx_data       = blk->data[tape->cur_pos++];
+    tape->rx_full       = true;
+    tape->rx_is_carrier = blk->is_carrier;
 
     if (tape->cur_pos == 1)
-        TAPE_LOGI("delivering block %d (%d bytes)", tape->cur_block, blk->len);
+        TAPE_LOGD("delivering block %d (%d bytes)", tape->cur_block, blk->len);
     TAPE_LOGD("deliver block=%d pos=%d byte=%02X",
               tape->cur_block, tape->cur_pos - 1, tape->rx_data);
 
@@ -378,4 +427,60 @@ void bbc_tape_tick(bbc_tape_t *tape, int cycles)
     /* Assert IRQ if enabled */
     if (tape->irq_enabled && tape->irq_cb)
         tape->irq_cb(tape->irq_ctx, true);
+}
+
+/* -------------------------------------------------------------------------
+ * bbc_tape_load_buffer
+ *
+ * Load raw bytes as a single tape block (for unit tests).
+ * Sets no_motor_delay so bytes arrive immediately when motor is turned on.
+ * ------------------------------------------------------------------------- */
+int bbc_tape_load_buffer(bbc_tape_t *tape, const uint8_t *buf, size_t len)
+{
+    if (!buf || len == 0 || len > BBC_TAPE_BLOCK_MAX) return -1;
+
+    bbc_tape_free(tape);
+
+    /* Reset all runtime state so tests start clean */
+    tape->motor_on      = false;
+    tape->running       = false;
+    tape->cycle_acc     = 0;
+    tape->rx_full       = false;
+    tape->rx_is_carrier = false;
+    tape->rx_data       = 0;
+
+    tape->blocks = (bbc_tape_block_t *)calloc(1, sizeof(bbc_tape_block_t));
+    if (!tape->blocks) return -1;
+
+    memcpy(tape->blocks[0].data, buf, len);
+    tape->blocks[0].len = (uint16_t)len;
+    tape->n_blocks       = 1;
+    tape->cur_block      = 0;
+    tape->cur_pos        = 0;
+    tape->no_motor_delay = true;   /* unit test: no 200ms startup delay */
+    return 0;
+}
+
+/* -------------------------------------------------------------------------
+ * bbc_tape_append_buffer
+ *
+ * Append a raw byte buffer as an additional tape block.
+ * Must be called after bbc_tape_load_buffer (or another append).
+ * ------------------------------------------------------------------------- */
+int bbc_tape_append_buffer(bbc_tape_t *tape, const uint8_t *buf, size_t len)
+{
+    if (!buf || len == 0 || len > BBC_TAPE_BLOCK_MAX) return -1;
+    if (!tape->blocks) return -1;
+
+    uint16_t n = tape->n_blocks;
+    bbc_tape_block_t *newblocks = (bbc_tape_block_t *)realloc(
+        tape->blocks, (size_t)(n + 1) * sizeof(bbc_tape_block_t));
+    if (!newblocks) return -1;
+
+    tape->blocks = newblocks;
+    memset(&tape->blocks[n], 0, sizeof(bbc_tape_block_t));
+    memcpy(tape->blocks[n].data, buf, len);
+    tape->blocks[n].len = (uint16_t)len;
+    tape->n_blocks       = (uint16_t)(n + 1);
+    return 0;
 }

@@ -15,8 +15,8 @@
  * Status bits (read $FE08):
  *   bit 0 = RDRF  Receive Data Register Full  (1 = byte ready)
  *   bit 1 = TDRE  Transmit Data Register Empty (always 1 for us)
- *   bit 2 = DCD   Data Carrier Detect          (0 = carrier present = motor on)
- *   bit 3 = CTS   Clear To Send                (0 = ok)
+ *   bit 2 = DCD   Data Carrier Detect          (1 = carrier present = motor on, BBC-specific polarity)
+ *   bit 3 = CTS   Clear To Send                (unused in cassette path, always 0)
  *   bit 7 = IRQ   Interrupt Request
  *
  * The MOS polls RDRF and reads $FE09 for each byte.
@@ -46,6 +46,7 @@
 typedef struct {
     uint8_t  data[BBC_TAPE_BLOCK_MAX];
     uint16_t len;
+    bool     is_carrier;   /* true = synthetic carrier tone block ($DC bytes) */
 } bbc_tape_block_t;
 
 /* -------------------------------------------------------------------------
@@ -64,12 +65,14 @@ typedef struct {
 
     /* Motor state */
     bool motor_on;
-    bool running;    /* true once motor has been turned on at least once */
+    bool running;       /* true once motor has been turned on at least once */
+    bool no_motor_delay; /* skip 200ms startup delay (set by load_buffer) */
 
     /* ACIA state */
     uint8_t  acia_control;   /* last written control byte */
     uint8_t  rx_data;        /* current receive byte */
     bool     rx_full;        /* RDRF: byte ready to read */
+    bool     rx_is_carrier;  /* true when rx_data came from a carrier block */
     bool     irq_enabled;    /* Rx IRQ enabled */
 
     /* Timing accumulator for byte delivery */
@@ -107,3 +110,12 @@ void    bbc_tape_write(bbc_tape_t *tape, uint8_t reg, uint8_t val);
 /* Advance tape by 'cycles' 2MHz clock cycles.
  * Delivers the next byte to the ACIA when enough time has elapsed. */
 void bbc_tape_tick(bbc_tape_t *tape, int cycles);
+
+/* Load raw byte buffer directly as a single tape block (for unit tests).
+ * Sets no_motor_delay=true so bytes arrive without the 200ms startup delay.
+ * Returns 0 on success, -1 on error. */
+int bbc_tape_load_buffer(bbc_tape_t *tape, const uint8_t *buf, size_t len);
+
+/* Append an additional raw byte buffer as a new tape block.
+ * Returns 0 on success, -1 on error. */
+int bbc_tape_append_buffer(bbc_tape_t *tape, const uint8_t *buf, size_t len);

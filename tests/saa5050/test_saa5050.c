@@ -116,22 +116,20 @@ static void test_init_reset(void)
     ASSERT_FALSE(tt.flash_state);
     ASSERT_EQ(tt.flash_counter, 0);
     ASSERT_EQ(tt.current_row, 0);
-    ASSERT_EQ(tt.current_scanline, 0);
-    ASSERT_FALSE(tt.dh_seen_this_row);
+    ASSERT_FALSE(tt.double_high1);   /* dh_seen_this_row in new API */
+    ASSERT_FALSE(tt.double_high2);
 
-    /* dh_row_bottom all false */
-    for (int i = 0; i < SAA5050_ROWS; i++) {
-        ASSERT_FALSE(tt.dh_row_bottom[i]);
-    }
-
-    /* reset clears flash state */
+    /* reset clears flash state and double-height state */
     tt.flash_state   = true;
     tt.flash_counter = 42;
+    tt.double_high1  = true;
+    tt.double_high2  = true;
     saa5050_reset(&tt);
     ASSERT_FALSE(tt.flash_state);
     ASSERT_EQ(tt.flash_counter, 0);
     ASSERT_EQ(tt.current_row, 0);
-    ASSERT_EQ(tt.current_scanline, 0);
+    ASSERT_FALSE(tt.double_high1);
+    ASSERT_FALSE(tt.double_high2);
 }
 
 /* --------------------------------------------------------------------------
@@ -144,20 +142,20 @@ static void test_builtin_rom(void)
     const uint8_t *rom = saa5050_get_builtin_rom();
     ASSERT_NOT_NULL(rom);
 
-    /* Space (0x20, idx=0) should be all zeros in ROM */
+    /* Space (0x20, idx=0) should be all zeros in ROM.
+     * ROM layout: [96 chars][10 rows][6 cols] = char_index * 60 + row * 6 + col */
     int all_zero = 1;
-    for (int r = 0; r < SAA5050_CHAR_ROWS; r++)
-        for (int c = 0; c < SAA5050_CHAR_COLS; c++)
-            if (rom[r * SAA5050_CHAR_COLS + c]) { all_zero = 0; break; }
+    for (int r = 0; r < 10; r++)
+        for (int c = 0; c < 6; c++)
+            if (rom[r * 6 + c]) { all_zero = 0; break; }
     ASSERT_TRUE(all_zero);
 
     /* ROM values are only 0 or 1 (unpacked pixels, not bitfields) */
     int valid = 1;
-    for (int ch = 0; ch < SAA5050_CHAR_COUNT && valid; ch++)
-        for (int r = 0; r < SAA5050_CHAR_ROWS && valid; r++)
-            for (int c = 0; c < SAA5050_CHAR_COLS && valid; c++) {
-                uint8_t v = rom[ch * SAA5050_CHAR_ROWS * SAA5050_CHAR_COLS
-                                + r * SAA5050_CHAR_COLS + c];
+    for (int ch = 0; ch < 96 && valid; ch++)
+        for (int r = 0; r < 10 && valid; r++)
+            for (int c = 0; c < 6 && valid; c++) {
+                uint8_t v = rom[ch * 10 * 6 + r * 6 + c];
                 if (v > 1) valid = 0;
             }
     ASSERT_TRUE(valid);
@@ -186,10 +184,10 @@ static void test_start_row_bounds(void)
     saa5050_start_row(&tt, 255);
     ASSERT_EQ(tt.current_row, 24);
 
-    /* start_row clears dh_seen_this_row */
-    tt.dh_seen_this_row = true;
+    /* start_row clears double_high1 (dh_seen_this_row equivalent) */
+    tt.double_high1 = true;
     saa5050_start_row(&tt, 5);
-    ASSERT_FALSE(tt.dh_seen_this_row);
+    ASSERT_FALSE(tt.double_high1);
 }
 
 /* --------------------------------------------------------------------------
@@ -206,7 +204,7 @@ static void test_start_scanline_init(void)
     saa5050_line_state_t ls;
     saa5050_start_scanline(&tt, &ls, 5);
 
-    ASSERT_EQ(tt.current_scanline, 5);
+    /* current_scanline not stored in new API; verify line_state is correct */
     ASSERT_EQ(ls.fg_colour, 7);       /* white */
     ASSERT_EQ(ls.bg_colour, 0);       /* black */
     ASSERT_FALSE(ls.graphics_mode);
@@ -220,7 +218,10 @@ static void test_start_scanline_init(void)
 }
 
 /* --------------------------------------------------------------------------
- * 5. start_scanline loads dh_row_bottom into double_height
+ * 5. start_scanline loads double_high2 into double_height
+ *
+ * In the new API, double_high2 (set by end_row) controls whether the current
+ * row renders as a DH bottom half. We can set double_high2 directly for testing.
  * -------------------------------------------------------------------------- */
 static void test_start_scanline_dh(void)
 {
@@ -228,14 +229,18 @@ static void test_start_scanline_dh(void)
 
     saa5050_t tt;
     saa5050_init(&tt, NULL);
-    tt.dh_row_bottom[3] = true;
+
+    /* Set double_high2=true to indicate the previous row had DH.
+     * This makes the current row render as DH bottom half. */
+    tt.double_high2 = true;
 
     saa5050_start_row(&tt, 3);
     saa5050_line_state_t ls;
     saa5050_start_scanline(&tt, &ls, 0);
     ASSERT_TRUE(ls.double_height);
 
-    /* Row 2 has dh_row_bottom=false */
+    /* With double_high2=false: no bottom-half rendering */
+    tt.double_high2 = false;
     saa5050_start_row(&tt, 2);
     saa5050_start_scanline(&tt, &ls, 0);
     ASSERT_FALSE(ls.double_height);
@@ -345,11 +350,10 @@ static void test_rom_rows_8_9(void)
      * Row 8 has data for a few descenders (e.g. '-', '`') so we only
      * assert row 9 here. */
     const uint8_t *rom = saa5050_get_builtin_rom();
-    for (int ch = 0; ch < SAA5050_CHAR_COUNT; ch++) {
+    for (int ch = 0; ch < 96; ch++) {
         int row = 9;
-        for (int col = 0; col < SAA5050_CHAR_COLS; col++) {
-            uint8_t v = rom[ch * SAA5050_CHAR_ROWS * SAA5050_CHAR_COLS
-                            + row * SAA5050_CHAR_COLS + col];
+        for (int col = 0; col < 6; col++) {
+            uint8_t v = rom[ch * 10 * 6 + row * 6 + col];
             ASSERT_EQ(v, 0);
         }
     }
@@ -418,6 +422,9 @@ static void test_default_colours(void)
 
 /* --------------------------------------------------------------------------
  * 12. Control codes 1-7: alphanumeric colour, exits graphics, clears held
+ *
+ * All control codes are Set-After: the effect shows on the character
+ * AFTER the control code.  A dummy render_char() is needed to commit.
  * -------------------------------------------------------------------------- */
 static void test_ctrl_alphanum_colour(void)
 {
@@ -430,25 +437,30 @@ static void test_ctrl_alphanum_colour(void)
     saa5050_line_state_t ls;
     uint8_t px[12];
 
-    /* Code 1 → fg=1 (red), exit graphics */
+    /* Set-After: render control code then a dummy char to commit the effect. */
+    /* First enter graphics: render 0x11 (code 17) then commit with dummy */
     saa5050_start_scanline(&tt, &ls, 0);
-    /* First enter graphics */
-    saa5050_render_char(&tt, &ls, 0x11, px);  /* code 17 = graphics colour 1 */
+    saa5050_render_char(&tt, &ls, 0x11, px);  /* sets next_graphics=true */
+    saa5050_render_char(&tt, &ls, 0x20, px);  /* commits: graphics_mode=true */
     ASSERT_TRUE(ls.graphics_mode);
-    /* Now code 1 = alphanumeric red */
-    saa5050_render_char(&tt, &ls, 0x01, px);
+
+    /* Code 1 = alphanumeric red: render 0x01 then commit */
+    saa5050_render_char(&tt, &ls, 0x01, px);  /* sets next_graphics=false, next_fg=1 */
+    saa5050_render_char(&tt, &ls, 0x20, px);  /* commits */
     ASSERT_EQ(ls.fg_colour, 1);
     ASSERT_FALSE(ls.graphics_mode);
-    ASSERT_EQ(ls.held_char, 0x20);   /* held_char cleared */
+    ASSERT_EQ(ls.held_char, 0x20);   /* held_char cleared by code 1 */
 
-    /* Code 7 → fg=7 (white) */
-    saa5050_render_char(&tt, &ls, 0x07, px);
+    /* Code 7 → fg=7 (white): render then commit */
+    saa5050_render_char(&tt, &ls, 0x07, px);  /* sets next_fg=7 */
+    saa5050_render_char(&tt, &ls, 0x20, px);  /* commits */
     ASSERT_EQ(ls.fg_colour, 7);
 
-    /* Test all codes 1-7 */
+    /* Test all codes 1-7: render code then commit, check effect */
     for (uint8_t code = 1; code <= 7; code++) {
         saa5050_start_scanline(&tt, &ls, 0);
-        saa5050_render_char(&tt, &ls, code, px);
+        saa5050_render_char(&tt, &ls, code, px);  /* sets next_fg=code */
+        saa5050_render_char(&tt, &ls, 0x20, px);  /* commits */
         ASSERT_EQ(ls.fg_colour, code);
         ASSERT_FALSE(ls.graphics_mode);
     }
@@ -470,14 +482,20 @@ static void test_ctrl_flash(void)
 
     saa5050_start_scanline(&tt, &ls, 0);
     ASSERT_FALSE(ls.flash);
-    saa5050_render_char(&tt, &ls, 0x08, px);  /* flash on */
+    /* Set-After: need a dummy char to commit the flash state */
+    saa5050_render_char(&tt, &ls, 0x08, px);  /* sets next_flash=true */
+    saa5050_render_char(&tt, &ls, 0x20, px);  /* commits: flash=true */
     ASSERT_TRUE(ls.flash);
-    saa5050_render_char(&tt, &ls, 0x09, px);  /* steady */
+    saa5050_render_char(&tt, &ls, 0x09, px);  /* sets next_flash=false */
+    saa5050_render_char(&tt, &ls, 0x20, px);  /* commits: flash=false */
     ASSERT_FALSE(ls.flash);
 }
 
 /* --------------------------------------------------------------------------
  * 14. Control code 12 (normal height) / 13 (double height + dh_seen)
+ *
+ * Set-After: double_height effect visible on char AFTER the code.
+ * double_high1 (formerly dh_seen_this_row) is set immediately when 0x0D seen.
  * -------------------------------------------------------------------------- */
 static void test_ctrl_double_height(void)
 {
@@ -492,22 +510,26 @@ static void test_ctrl_double_height(void)
 
     saa5050_start_scanline(&tt, &ls, 0);
     ASSERT_FALSE(ls.double_height);
-    ASSERT_FALSE(tt.dh_seen_this_row);
+    ASSERT_FALSE(tt.double_high1);
 
-    /* Code 13: double height */
-    saa5050_render_char(&tt, &ls, 0x0D, px);
+    /* Code 13: double height (Set-After: effect on next char) */
+    saa5050_render_char(&tt, &ls, 0x0D, px);  /* sets next_double_height, double_high1 */
+    ASSERT_TRUE(tt.double_high1);             /* double_high1 set immediately */
+    saa5050_render_char(&tt, &ls, 0x20, px);  /* commits: double_height=true */
     ASSERT_TRUE(ls.double_height);
-    ASSERT_TRUE(tt.dh_seen_this_row);
 
-    /* Code 12: normal height */
-    saa5050_render_char(&tt, &ls, 0x0C, px);
+    /* Code 12: normal height (Set-After) */
+    saa5050_render_char(&tt, &ls, 0x0C, px);  /* sets next_double_height=false */
+    saa5050_render_char(&tt, &ls, 0x20, px);  /* commits: double_height=false */
     ASSERT_FALSE(ls.double_height);
-    /* dh_seen_this_row stays true once set in this row */
-    ASSERT_TRUE(tt.dh_seen_this_row);
+    /* double_high1 stays true once set in this row */
+    ASSERT_TRUE(tt.double_high1);
 }
 
 /* --------------------------------------------------------------------------
  * 15. Control codes 17-23: graphics colour + enters graphics mode
+ *
+ * Set-After: effect visible on char AFTER the control code.
  * -------------------------------------------------------------------------- */
 static void test_ctrl_graphics_colour(void)
 {
@@ -523,26 +545,29 @@ static void test_ctrl_graphics_colour(void)
     /* Code 17 (0x11) = graphics colour 1 (red), enter graphics */
     saa5050_start_scanline(&tt, &ls, 0);
     ASSERT_FALSE(ls.graphics_mode);
-    saa5050_render_char(&tt, &ls, 0x11, px);
+    saa5050_render_char(&tt, &ls, 0x11, px);  /* sets next_fg=1, next_graphics=true */
+    saa5050_render_char(&tt, &ls, 0x20, px);  /* commits */
     ASSERT_EQ(ls.fg_colour, 1);
     ASSERT_TRUE(ls.graphics_mode);
 
     /* Code 23 (0x17) = graphics colour 7 (white) */
-    saa5050_render_char(&tt, &ls, 0x17, px);
+    saa5050_render_char(&tt, &ls, 0x17, px);  /* sets next_fg=7 */
+    saa5050_render_char(&tt, &ls, 0x20, px);  /* commits */
     ASSERT_EQ(ls.fg_colour, 7);
     ASSERT_TRUE(ls.graphics_mode);
 
     /* All codes 17-23: fg = code & 0x07 */
     for (uint8_t code = 17; code <= 23; code++) {
         saa5050_start_scanline(&tt, &ls, 0);
-        saa5050_render_char(&tt, &ls, code, px);
+        saa5050_render_char(&tt, &ls, code, px);  /* sets next */
+        saa5050_render_char(&tt, &ls, 0x20, px);  /* commits */
         ASSERT_EQ(ls.fg_colour, code & 0x07);
         ASSERT_TRUE(ls.graphics_mode);
     }
 }
 
 /* --------------------------------------------------------------------------
- * 16. Control code 24 (conceal): fg = bg
+ * 16. Control code 24 (conceal): fg = bg  (Set-After)
  * -------------------------------------------------------------------------- */
 static void test_ctrl_conceal(void)
 {
@@ -556,8 +581,9 @@ static void test_ctrl_conceal(void)
     uint8_t px[12];
 
     saa5050_start_scanline(&tt, &ls, 0);
-    /* bg=0, fg=7 initially; after conceal, fg=0 */
-    saa5050_render_char(&tt, &ls, 0x18, px);   /* code 24 = conceal */
+    /* bg=0, fg=7 initially; conceal sets next_fg=bg(0) → after commit: fg=0 */
+    saa5050_render_char(&tt, &ls, 0x18, px);   /* code 24 = conceal → next_fg=0 */
+    saa5050_render_char(&tt, &ls, 0x20, px);   /* commits: fg_colour=0 */
     ASSERT_EQ(ls.fg_colour, 0);
     ASSERT_EQ(ls.bg_colour, 0);
 
@@ -583,10 +609,12 @@ static void test_ctrl_separated(void)
     saa5050_start_scanline(&tt, &ls, 0);
     ASSERT_FALSE(ls.separated_gfx);
 
-    saa5050_render_char(&tt, &ls, 0x1A, px);   /* code 26 = separated */
+    saa5050_render_char(&tt, &ls, 0x1A, px);   /* code 26 = separated (Set-After) */
+    saa5050_render_char(&tt, &ls, 0x20, px);   /* commits */
     ASSERT_TRUE(ls.separated_gfx);
 
-    saa5050_render_char(&tt, &ls, 0x19, px);   /* code 25 = contiguous */
+    saa5050_render_char(&tt, &ls, 0x19, px);   /* code 25 = contiguous (Set-After) */
+    saa5050_render_char(&tt, &ls, 0x20, px);   /* commits */
     ASSERT_FALSE(ls.separated_gfx);
 }
 
@@ -605,18 +633,23 @@ static void test_ctrl_background(void)
     uint8_t px[12];
 
     saa5050_start_scanline(&tt, &ls, 0);
-    /* Set fg to red (1) first */
-    saa5050_render_char(&tt, &ls, 0x01, px);   /* alphanum red */
+    /* Set fg to red (1): render code 1 then commit */
+    saa5050_render_char(&tt, &ls, 0x01, px);   /* sets next_fg=1 */
+    saa5050_render_char(&tt, &ls, 0x20, px);   /* commits */
     ASSERT_EQ(ls.fg_colour, 1);
     ASSERT_EQ(ls.bg_colour, 0);
 
-    /* Code 29: new background = current fg (1=red) */
-    saa5050_render_char(&tt, &ls, 0x1D, px);
+    /* Code 29: new background = current next_fg (1=red) — Set-After */
+    /* Note: 0x1D uses next_fg at the time it's processed, which is the
+     * current fg (1) since we committed. Then bg becomes fg(1). */
+    saa5050_render_char(&tt, &ls, 0x1D, px);   /* sets next_bg = next_fg(=1) */
+    saa5050_render_char(&tt, &ls, 0x20, px);   /* commits: bg_colour=1 */
     ASSERT_EQ(ls.bg_colour, 1);
     ASSERT_EQ(ls.fg_colour, 1);
 
-    /* Code 28: black background */
-    saa5050_render_char(&tt, &ls, 0x1C, px);
+    /* Code 28: black background (Set-After) */
+    saa5050_render_char(&tt, &ls, 0x1C, px);   /* sets next_bg=0 */
+    saa5050_render_char(&tt, &ls, 0x20, px);   /* commits */
     ASSERT_EQ(ls.bg_colour, 0);
 }
 
@@ -637,10 +670,12 @@ static void test_ctrl_hold_release(void)
     saa5050_start_scanline(&tt, &ls, 0);
     ASSERT_FALSE(ls.hold_graphics);
 
-    saa5050_render_char(&tt, &ls, 0x1E, px);   /* code 30 = hold */
+    saa5050_render_char(&tt, &ls, 0x1E, px);   /* code 30 = hold (Set-After) */
+    saa5050_render_char(&tt, &ls, 0x20, px);   /* commits */
     ASSERT_TRUE(ls.hold_graphics);
 
-    saa5050_render_char(&tt, &ls, 0x1F, px);   /* code 31 = release */
+    saa5050_render_char(&tt, &ls, 0x1F, px);   /* code 31 = release (Set-After) */
+    saa5050_render_char(&tt, &ls, 0x20, px);   /* commits */
     ASSERT_FALSE(ls.hold_graphics);
 }
 
@@ -690,8 +725,8 @@ static void test_graphics_mode_chars(void)
 
     /* Enter graphics mode (white graphics = code 23) */
     saa5050_start_scanline(&tt, &ls, 0);
-    saa5050_render_char(&tt, &ls, 0x17, px);   /* code 23 */
-    ASSERT_TRUE(ls.graphics_mode);
+    saa5050_render_char(&tt, &ls, 0x17, px);   /* code 23 — Set-After: next_graphics=true */
+    ASSERT_TRUE(ls.next_graphics);   /* committed on next render_char */
 
     /* 0x20 in graphics mode: sixel with all-zero bits → all bg */
     saa5050_render_char(&tt, &ls, 0x20, px);
@@ -778,10 +813,10 @@ static void test_sixel_bit_mapping(void)
     for (int i = 6; i < 12; i++) ASSERT_EQ(px[i], 7);
 
     /* Bottom third (rows 7-9): scanline 14 → rom_row 7 → third=2 */
-    /* Code 0x30 = bit4=1 (bot-left), bit5=1 */
+    /* Code 0x70: sixel=(0x70-0x20)&0x3F=0x10=bit4 → bot-left only */
     saa5050_start_scanline(&tt, &ls, 14);  /* scanline 14 → rom_row 7 → third=2 */
     saa5050_render_char(&tt, &ls, 0x17, px);
-    saa5050_render_char(&tt, &ls, 0x30, px);  /* sixel: bit4=1 (bot-left) */
+    saa5050_render_char(&tt, &ls, 0x70, px);  /* sixel: bit4=1 (bot-left only) */
     for (int i = 0; i < 6; i++)  ASSERT_EQ(px[i], 7);
     for (int i = 6; i < 12; i++) ASSERT_EQ(px[i], 0);
 
@@ -904,8 +939,8 @@ static void test_hold_graphics(void)
      * then render a control code — held char should show. */
     saa5050_start_scanline(&tt, &ls, 0);
     saa5050_render_char(&tt, &ls, 0x17, px_space);  /* gfx mode white */
-    saa5050_render_char(&tt, &ls, 0x1E, px_space);  /* hold on */
-    ASSERT_TRUE(ls.hold_graphics);
+    saa5050_render_char(&tt, &ls, 0x1E, px_space);  /* hold on — Set-After: next_hold=true */
+    ASSERT_TRUE(ls.next_hold);   /* committed on next render_char */
 
     /* Render a graphic char to set held_char */
     saa5050_render_char(&tt, &ls, 0x21, px_gfx);   /* sixel bit0=1, third=0: left half lit */
@@ -950,9 +985,9 @@ static void test_hold_release_shows_char(void)
     saa5050_render_char(&tt, &ls, 0x21, px_gfx);   /* set held_char=0x21 */
 
     /* Release (0x1F) while hold is on: hold_old=true, so this cell
-     * shows the held char AND turns hold off for next cell. */
+     * shows the held char AND turns hold off for next cell (Set-After). */
     saa5050_render_char(&tt, &ls, 0x1F, px_release);
-    ASSERT_FALSE(ls.hold_graphics);   /* released */
+    ASSERT_FALSE(ls.next_hold);   /* Set-After: hold released for next cell */
     /* This cell should show held char (0x21 = top-left lit) */
     for (int i = 0; i < 6; i++)  ASSERT_EQ(px_release[i], 7);
     for (int i = 6; i < 12; i++) ASSERT_EQ(px_release[i], 0);
@@ -1107,12 +1142,10 @@ static void test_flash_timing(void)
 }
 
 /* --------------------------------------------------------------------------
- * 30. Double-height: bottom half uses rom_row = (scan>>1)+5
- *     On the bottom half (dh_row_bottom=true), scanline 0 → rom_row=5,
- *     scanline 9 → rom_row=9 (clamped).
- *     ROM rows 8-9 are all zero, so scanlines 6-9 on bottom half are blank.
- *     We compare bottom-half scanline 0 output against normal scanline 10
- *     (which also maps to rom_row=5). They should match.
+ * 30. Double-height: bottom half uses line_addr = (lc/2)+5
+ *     In the new API, double_high2=true makes start_scanline set double_height=true.
+ *     bottom-half scanline 0 → line_addr = (0>>1)+5 = 5 (same as normal scanline 10).
+ *     ROM rows 8-9 are all zero, so scanlines where line_addr>=8 are blank.
  * -------------------------------------------------------------------------- */
 static void test_double_height_bottom(void)
 {
@@ -1124,33 +1157,37 @@ static void test_double_height_bottom(void)
     uint8_t px_dh_bottom[12], px_normal[12];
     saa5050_line_state_t ls;
 
-    /* Bottom-half rendering of 'A': scanline 0 → rom_row = 0+5 = 5 */
-    tt.dh_row_bottom[1] = true;
+    /* Bottom-half rendering of 'A': set double_high2=true, scanline 0 → line_addr=5 */
+    tt.double_high2 = true;
     saa5050_start_row(&tt, 1);
     saa5050_start_scanline(&tt, &ls, 0);   /* scanline 0 on DH-bottom row */
     ASSERT_TRUE(ls.double_height);
     saa5050_render_char(&tt, &ls, 0x41, px_dh_bottom);
 
-    /* Normal rendering of 'A': scanline 10 → rom_row = 10>>1 = 5 */
-    tt.dh_row_bottom[0] = false;
+    /* Normal rendering of 'A': scanline 10 → line_addr = 10>>1 = 5 */
+    tt.double_high2 = false;
     saa5050_start_row(&tt, 0);
-    saa5050_start_scanline(&tt, &ls, 10);   /* scanline 10 → rom_row=5 */
+    saa5050_start_scanline(&tt, &ls, 10);   /* scanline 10 → line_addr=5 */
     ASSERT_FALSE(ls.double_height);
     saa5050_render_char(&tt, &ls, 0x41, px_normal);
 
-    /* Both should use rom_row=5 → identical output */
+    /* Both should use line_addr=5 → identical output */
     for (int i = 0; i < 12; i++)
         ASSERT_EQ(px_dh_bottom[i], px_normal[i]);
 
-    /* Bottom-half scanline 6 → rom_row = 3+5 = 8 → all-zero row → all bg */
+    /* Bottom-half scanline 6 → line_addr = (6>>1)+5 = 8 → all-zero row → all bg */
+    tt.double_high2 = true;
     saa5050_start_row(&tt, 1);
-    saa5050_start_scanline(&tt, &ls, 6);   /* scanline 6 → (6>>1)+5 = 8 → all zero */
+    saa5050_start_scanline(&tt, &ls, 6);
     saa5050_render_char(&tt, &ls, 0x41, px_dh_bottom);
     ASSERT_TRUE(all_pixels_eq(px_dh_bottom, 0));
 }
 
 /* --------------------------------------------------------------------------
- * 31. dh_row_bottom propagation at scanline 19
+ * 31. DH propagation via end_row()
+ *
+ * In the new API, double_high1 is set when \x0D is seen during render_line
+ * or render_char.  end_row() latches: double_high2 ← double_high1.
  * -------------------------------------------------------------------------- */
 static void test_dh_propagation(void)
 {
@@ -1160,34 +1197,37 @@ static void test_dh_propagation(void)
     saa5050_init(&tt, NULL);
 
     saa5050_line_state_t ls;
-    uint8_t px[12];
+    (void)ls;
+    uint8_t px[40 * SAA5050_PIXELS_PER_CHAR];   /* 480 bytes for render_line */
+    uint8_t ram[40];
+    memset(ram, 0x20, 40);
+    ram[0] = 0x0D;   /* DH code in column 0 */
 
-    ASSERT_FALSE(tt.dh_row_bottom[1]);
-
-    /* Render row 0: at scanline 19 with a DH code, row 1 should be flagged */
+    /* Render row 0 with a DH code → double_high1 becomes true */
     saa5050_start_row(&tt, 0);
-    /* Set dh_seen_this_row via rendering code 0x0D on any scanline */
-    saa5050_start_scanline(&tt, &ls, 0);
-    saa5050_render_char(&tt, &ls, 0x0D, px);   /* double height */
-    ASSERT_TRUE(tt.dh_seen_this_row);
+    saa5050_render_line(&tt, ram, 0, px);   /* renders all 40 chars, sets double_high1 */
+    ASSERT_TRUE(tt.double_high1);
+    ASSERT_FALSE(tt.double_high2);
 
-    /* Render scanline 19 (last scanline): propagates to row 1 */
-    saa5050_start_scanline(&tt, &ls, 19);
-    saa5050_render_char(&tt, &ls, 0x0D, px);   /* re-set dh_seen */
-    /* Render a printable char to trigger the propagation check */
-    saa5050_render_char(&tt, &ls, 0x41, px);
-    ASSERT_TRUE(tt.dh_row_bottom[1]);
+    /* end_row() propagates: double_high2 ← double_high1 */
+    saa5050_end_row(&tt);
+    ASSERT_TRUE(tt.double_high2);
 
-    /* Without DH code: row 2 should not be flagged */
+    /* Row 1 without DH code: double_high1 resets at start_row */
+    memset(ram, 0x20, 40);
     saa5050_start_row(&tt, 1);
-    saa5050_start_scanline(&tt, &ls, 19);
-    saa5050_render_char(&tt, &ls, 0x41, px);   /* just text, no DH */
-    ASSERT_FALSE(tt.dh_row_bottom[2]);
+    ASSERT_FALSE(tt.double_high1);
+    saa5050_render_line(&tt, ram, 0, px);
+    ASSERT_FALSE(tt.double_high1);
 
-    /* Verify: row 0 start clears dh_seen_this_row */
-    tt.dh_seen_this_row = true;
+    /* end_row(): double_high2 ← false */
+    saa5050_end_row(&tt);
+    ASSERT_FALSE(tt.double_high2);
+
+    /* Verify: row 0 start clears double_high1 */
+    tt.double_high1 = true;
     saa5050_start_row(&tt, 0);
-    ASSERT_FALSE(tt.dh_seen_this_row);
+    ASSERT_FALSE(tt.double_high1);
 }
 
 /* --------------------------------------------------------------------------
@@ -1205,16 +1245,16 @@ static void test_reset(void)
     tt.flash_state   = true;
     tt.flash_counter = 55;
     tt.current_row   = 10;
-    tt.dh_row_bottom[5] = true;
-    tt.dh_seen_this_row = true;
+    tt.double_high2  = true;
+    tt.double_high1  = true;
 
     saa5050_reset(&tt);
 
     ASSERT_FALSE(tt.flash_state);
     ASSERT_EQ(tt.flash_counter, 0);
     ASSERT_EQ(tt.current_row, 0);
-    ASSERT_FALSE(tt.dh_row_bottom[5]);
-    ASSERT_FALSE(tt.dh_seen_this_row);
+    ASSERT_FALSE(tt.double_high2);
+    ASSERT_FALSE(tt.double_high1);
     /* char_rom is preserved by reset (reset doesn't touch it) */
     ASSERT_TRUE(tt.char_rom == saved_rom);
 }
@@ -1228,10 +1268,10 @@ static void test_custom_rom(void)
 
     /* Build a minimal custom ROM: all zeros except char index 0 ('A'-'A'+0
      * = space actually) — let's put index 1 ('A') row 0 all-ones. */
-    static uint8_t custom_rom[SAA5050_CHAR_COUNT][SAA5050_CHAR_ROWS][SAA5050_CHAR_COLS];
+    static uint8_t custom_rom[96][10][6];
     memset(custom_rom, 0, sizeof(custom_rom));
     /* Character 'A' = index 0x41-0x20 = 0x21 = 33. Set row 0 all-ones. */
-    for (int c = 0; c < SAA5050_CHAR_COLS; c++)
+    for (int c = 0; c < 6; c++)
         custom_rom[0x21][0][c] = 1;
 
     saa5050_t tt;
