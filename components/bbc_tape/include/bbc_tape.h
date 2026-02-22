@@ -64,7 +64,8 @@ typedef struct {
 
     /* Motor state */
     bool motor_on;
-    bool running;    /* true once motor has been turned on at least once */
+    bool running;       /* true once motor has been turned on at least once */
+    bool no_motor_delay; /* skip 200ms startup delay (set by load_buffer) */
 
     /* ACIA state */
     uint8_t  acia_control;   /* last written control byte */
@@ -107,3 +108,12 @@ void    bbc_tape_write(bbc_tape_t *tape, uint8_t reg, uint8_t val);
 /* Advance tape by 'cycles' 2MHz clock cycles.
  * Delivers the next byte to the ACIA when enough time has elapsed. */
 void bbc_tape_tick(bbc_tape_t *tape, int cycles);
+
+/* Load raw byte buffer directly as a single tape block (for unit tests).
+ * Sets no_motor_delay=true so bytes arrive without the 200ms startup delay.
+ * Returns 0 on success, -1 on error. */
+int bbc_tape_load_buffer(bbc_tape_t *tape, const uint8_t *buf, size_t len);
+
+/* Append an additional raw byte buffer as a new tape block.
+ * Returns 0 on success, -1 on error. */
+int bbc_tape_append_buffer(bbc_tape_t *tape, const uint8_t *buf, size_t len);

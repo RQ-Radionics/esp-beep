@@ -252,11 +252,20 @@ void bbc_tape_set_motor(bbc_tape_t *tape, bool on)
     tape->motor_on = on;
     TAPE_LOGI("motor %s", on ? "ON" : "OFF");
     if (on) {
-        /* Give the MOS ~200ms to configure the ACIA before first byte arrives.
-         * 200ms * 2MHz = 400000 cycles delay. */
-        tape->cycle_acc = -400000;
-        tape->rx_full   = false;
-        tape->running   = true;
+        /* Give the MOS ~200ms to configure the ACIA before first byte arrives
+         * on the first motor-on.  Subsequent motor-on (motor toggle) uses a
+         * shorter re-engage delay (one byte period) so the stream resumes
+         * promptly without discarding already-latched bytes.
+         * Skipped entirely in test mode (no_motor_delay). */
+        if (!tape->running) {
+            tape->cycle_acc = tape->no_motor_delay ? 0 : -400000;
+        } else {
+            /* Already ran before — just a brief re-engage delay */
+            tape->cycle_acc = tape->no_motor_delay ? 0 : -CYCLES_PER_BYTE;
+        }
+        tape->running = true;
+        /* Do NOT reset rx_full here: a byte latched while motor was briefly
+         * off should still be available to the MOS on motor-on. */
     }
 }
 
@@ -346,10 +355,10 @@ void bbc_tape_write(bbc_tape_t *tape, uint8_t reg, uint8_t val)
  * ------------------------------------------------------------------------- */
 void bbc_tape_tick(bbc_tape_t *tape, int cycles)
 {
-    /* Only deliver once the motor has been turned on at least once.
-     * After that, keep streaming even if motor is turned off (relay inertia).
+    /* Only deliver bytes when the motor is running.
+     * We require both running (has been on at least once) and motor_on.
      * The DCD bit in status reflects motor_on; the MOS uses DCD for error detection. */
-    if (!tape->running) return;
+    if (!tape->running || !tape->motor_on) return;
     if (!tape->blocks || tape->cur_block >= tape->n_blocks) return;
     if (tape->rx_full) return;  /* MOS hasn't read the previous byte yet */
 
@@ -378,4 +387,52 @@ void bbc_tape_tick(bbc_tape_t *tape, int cycles)
     /* Assert IRQ if enabled */
     if (tape->irq_enabled && tape->irq_cb)
         tape->irq_cb(tape->irq_ctx, true);
+}
+
+/* -------------------------------------------------------------------------
+ * bbc_tape_load_buffer
+ *
+ * Load raw bytes as a single tape block (for unit tests).
+ * Sets no_motor_delay so bytes arrive immediately when motor is turned on.
+ * ------------------------------------------------------------------------- */
+int bbc_tape_load_buffer(bbc_tape_t *tape, const uint8_t *buf, size_t len)
+{
+    if (!buf || len == 0 || len > BBC_TAPE_BLOCK_MAX) return -1;
+
+    bbc_tape_free(tape);
+
+    tape->blocks = (bbc_tape_block_t *)calloc(1, sizeof(bbc_tape_block_t));
+    if (!tape->blocks) return -1;
+
+    memcpy(tape->blocks[0].data, buf, len);
+    tape->blocks[0].len = (uint16_t)len;
+    tape->n_blocks       = 1;
+    tape->cur_block      = 0;
+    tape->cur_pos        = 0;
+    tape->no_motor_delay = true;   /* unit test: no 200ms startup delay */
+    return 0;
+}
+
+/* -------------------------------------------------------------------------
+ * bbc_tape_append_buffer
+ *
+ * Append a raw byte buffer as an additional tape block.
+ * Must be called after bbc_tape_load_buffer (or another append).
+ * ------------------------------------------------------------------------- */
+int bbc_tape_append_buffer(bbc_tape_t *tape, const uint8_t *buf, size_t len)
+{
+    if (!buf || len == 0 || len > BBC_TAPE_BLOCK_MAX) return -1;
+    if (!tape->blocks) return -1;
+
+    uint16_t n = tape->n_blocks;
+    bbc_tape_block_t *newblocks = (bbc_tape_block_t *)realloc(
+        tape->blocks, (size_t)(n + 1) * sizeof(bbc_tape_block_t));
+    if (!newblocks) return -1;
+
+    tape->blocks = newblocks;
+    memset(&tape->blocks[n], 0, sizeof(bbc_tape_block_t));
+    memcpy(tape->blocks[n].data, buf, len);
+    tape->blocks[n].len = (uint16_t)len;
+    tape->n_blocks       = (uint16_t)(n + 1);
+    return 0;
 }
