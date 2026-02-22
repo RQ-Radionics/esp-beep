@@ -192,7 +192,10 @@ void bbc_machine_init(bbc_machine_t *m,
         io_acia_read, io_acia_write, m);
 
     /* Serial ULA control: &FE10 (write-only).
-     * bit 0 = tape motor (1=ON), bits 2:1 = TX baud, bits 4:3 = RX baud. */
+     * bit 0 = RS423/cassette select (0=cassette, 1=RS423) — NOT motor relay.
+     * bits 2:1 = TX baud rate select
+     * bits 4:3 = RX baud rate select
+     * Motor relay is controlled by System VIA CB2 only (sv_motor_changed). */
     bbc_memory_set_write_callback(m->mem, 0xFE10, io_serial_ula_write, m);
 }
 
@@ -297,13 +300,15 @@ int bbc_machine_step(bbc_machine_t *m) {
         uint16_t pc = bbc_cpu_get_pc(m->cpu);
         uint8_t *ram = bbc_memory_get_ram(m->mem);
         uint8_t acia_st = bbc_tape_read(&m->tape, 0); /* read ACIA status non-destructively */
-        fprintf(stderr, "[wdog] PC=$%04X C2=$%02X EA=$%02X 0278=$%02X ACIA_st=%02X irq(sv=%d uv=%d ac=%d)\n",
+        fprintf(stderr, "[wdog] PC=$%04X C2=$%02X EA=$%02X 0250=$%02X 0278=$%02X ACIA_st=%02X irq(sv=%d uv=%d ac=%d) block=%d/%d\n",
                 pc,
                 ram ? ram[0xC2] : 0xFF,
                 ram ? ram[0xEA] : 0xFF,
+                ram ? ram[0x0250] : 0xFF, /* $0250 = ACIA control shadow */
                 ram ? ram[0x0278] : 0xFF, /* $0278 tape/serial config */
                 acia_st,
-                m->irq.sysvia, m->irq.uservia, m->irq.acia);
+                m->irq.sysvia, m->irq.uservia, m->irq.acia,
+                m->tape.cur_block, m->tape.n_blocks);
         (void)acia_st;
         last_reported_pc = pc;
     }
@@ -698,18 +703,19 @@ static void io_acia_write(uint16_t addr, uint8_t val, void *ctx) {
  * Serial ULA control register — &FE10 (write only)
  *
  * BBC Micro Serial ULA (IC57):
- *   bit 0   = tape motor relay  (1=ON, 0=OFF)
+ *   bit 0   = RS423/cassette select (0=cassette, 1=RS423)
  *   bits 2:1 = transmit baud rate select
  *   bits 4:3 = receive baud rate select
  *   bits 7:5 = other (RS423 control, ignored here)
+ *
+ * NOTE: the tape motor relay is controlled by System VIA CB2, NOT here.
  * ====================================================================== */
 
 static void io_serial_ula_write(uint16_t addr, uint8_t val, void *ctx) {
     (void)addr;
-    bbc_machine_t *m = (bbc_machine_t *)ctx;
-    bool motor_on = (val & 0x01) != 0;
-    fprintf(stderr, "[serial_ula] FE10 write %02X  motor=%s\n", val, motor_on ? "ON" : "OFF");
-    bbc_tape_set_motor(&m->tape, motor_on);
+    (void)ctx;
+    /* Baud rate and RS423/cassette select — not yet used, log only */
+    fprintf(stderr, "[serial_ula] FE10 write %02X\n", val);
 }
 
 /* ======================================================================

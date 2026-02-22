@@ -144,10 +144,10 @@ static void test_reset_state(void)
     /* After init: motor off, no byte ready */
     uint8_t st = bbc_tape_read(&t, 0);
 
-    /* TDRE=1 always, DCD=1 (motor off = no carrier), RDRF=0, IRQ=0 */
+    /* TDRE=1 always, DCD=0 (motor off = no carrier), RDRF=0, IRQ=0 */
     ASSERT_EQ(st & STATUS_RDRF, 0);
     ASSERT_EQ(st & STATUS_TDRE, STATUS_TDRE);
-    ASSERT_EQ(st & STATUS_DCD,  STATUS_DCD);
+    ASSERT_EQ(st & STATUS_DCD,  0);
     ASSERT_EQ(st & STATUS_IRQ,  0);
     ASSERT_FALSE(s_irq_state);
 }
@@ -198,7 +198,7 @@ static void test_master_reset_clears_rdrf(void)
 }
 
 /* =========================================================================
- * Test: motor off → DCD=1 (no carrier)
+ * Test: motor off → DCD=0 (no carrier)
  * ========================================================================= */
 static void test_motor_off_dcd(void)
 {
@@ -206,18 +206,49 @@ static void test_motor_off_dcd(void)
     tape_init_with_irq(&t);
 
     bbc_tape_set_motor(&t, false);
-    ASSERT_EQ(bbc_tape_read(&t, 0) & STATUS_DCD, STATUS_DCD);
+    ASSERT_EQ(bbc_tape_read(&t, 0) & STATUS_DCD, 0);
 }
 
 /* =========================================================================
- * Test: motor on → DCD=0 (carrier present)
+ * Test: DCD reflects carrier vs data byte type, not just motor state.
+ *
+ * BBC Micro DCD semantics (per MOS $F5B7 analysis):
+ *   carrier byte latched (rx_is_carrier=true)  → DCD=1
+ *   data byte    latched (rx_is_carrier=false) → DCD=0
+ *   no byte (motor on, idle)                   → DCD=0
+ *
+ * The MOS carrier sync loop needs:
+ *   C2=1 carrier bytes: DCD=1 → C=1 after 3xLSR → C2 1→2
+ *   C2=2 data bytes:    DCD=0 → C=0 after 3xLSR → CMP #$2A → C2 2→3
  * ========================================================================= */
 static void test_motor_on_dcd(void)
 {
     bbc_tape_t t;
     tape_init_with_irq(&t);
 
+    /* No byte pending: DCD=0 even with motor on */
     bbc_tape_set_motor(&t, true);
+    ASSERT_EQ(bbc_tape_read(&t, 0) & STATUS_DCD, 0);
+
+    /* Load a carrier block: DCD=1 when carrier byte is latched */
+    static const uint8_t carrier[4] = { 0xDC, 0xDC, 0xDC, 0xDC };
+    bbc_tape_load_buffer(&t, carrier, sizeof(carrier)); /* resets state, no_motor_delay=true */
+    t.blocks[0].is_carrier = true;
+    /* load_buffer resets motor_on=false, running=false */
+    bbc_tape_set_motor(&t, true);
+    bbc_tape_tick(&t, ONE_BYTE_CYCLES + 1);
+    ASSERT_TRUE(t.rx_full);
+    ASSERT_EQ(bbc_tape_read(&t, 0) & STATUS_DCD, STATUS_DCD);
+    /* consume the byte so rx_full=false */
+    bbc_tape_read(&t, 1);
+
+    /* Load a data block: DCD=0 when data byte is latched */
+    static const uint8_t databuf[4] = { 0x2A, 0x41, 0x44, 0x56 };
+    bbc_tape_load_buffer(&t, databuf, sizeof(databuf)); /* resets state */
+    /* is_carrier defaults to false (calloc) */
+    bbc_tape_set_motor(&t, true);
+    bbc_tape_tick(&t, ONE_BYTE_CYCLES + 1);
+    ASSERT_TRUE(t.rx_full);
     ASSERT_EQ(bbc_tape_read(&t, 0) & STATUS_DCD, 0);
 }
 

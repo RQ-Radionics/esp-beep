@@ -15,8 +15,8 @@
  * Status bits (read $FE08):
  *   bit 0 = RDRF  Receive Data Register Full  (1 = byte ready)
  *   bit 1 = TDRE  Transmit Data Register Empty (always 1 for us)
- *   bit 2 = DCD   Data Carrier Detect          (0 = carrier present = motor on)
- *   bit 3 = CTS   Clear To Send                (0 = ok)
+ *   bit 2 = DCD   Data Carrier Detect          (1 = carrier present = motor on, BBC-specific polarity)
+ *   bit 3 = CTS   Clear To Send                (unused in cassette path, always 0)
  *   bit 7 = IRQ   Interrupt Request
  *
  * The MOS polls RDRF and reads $FE09 for each byte.
@@ -46,6 +46,7 @@
 typedef struct {
     uint8_t  data[BBC_TAPE_BLOCK_MAX];
     uint16_t len;
+    bool     is_carrier;   /* true = synthetic carrier tone block ($DC bytes) */
 } bbc_tape_block_t;
 
 /* -------------------------------------------------------------------------
@@ -71,6 +72,7 @@ typedef struct {
     uint8_t  acia_control;   /* last written control byte */
     uint8_t  rx_data;        /* current receive byte */
     bool     rx_full;        /* RDRF: byte ready to read */
+    bool     rx_is_carrier;  /* true when rx_data came from a carrier block */
     bool     irq_enabled;    /* Rx IRQ enabled */
 
     /* Timing accumulator for byte delivery */
