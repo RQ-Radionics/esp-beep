@@ -29,8 +29,8 @@
 #  define WD_LOGW(fmt, ...) ESP_LOGW("wd1770", fmt, ##__VA_ARGS__)
 #else
 #  include <stdio.h>
-#  define WD_LOGD(fmt, ...) /* no-op in host builds */
-#  define WD_LOGW(fmt, ...) fprintf(stderr, "wd1770 WARN: " fmt "\n", ##__VA_ARGS__)
+#  define WD_LOGD(fmt, ...) ((void)0)
+#  define WD_LOGW(fmt, ...) ((void)0)
 #endif
 
 /* Delay constants (in 2 MHz BBC clock cycles, as in B-em) */
@@ -41,6 +41,12 @@
 #define DELAY_FAULT      200   /* time before fault callback */
 #define DELAY_ABORT      200   /* time for force-interrupt abort */
 #define DELAY_SEEK_ALLOW 800   /* allow time for Opus DDOS seek cancel */
+
+/* INDEX pulse timing.
+ * 300 RPM = 5 rev/sec = 200 ms/rev = 400000 cycles/rev @ 2 MHz.
+ * The INDEX pulse is active for ~2 ms = 4000 cycles. */
+#define INDEX_PERIOD_CYCLES 400000
+#define INDEX_PULSE_CYCLES    4000
 
 /* -------------------------------------------------------------------------
  * Internal helpers
@@ -86,7 +92,7 @@ static void completed(wd1770_t *fdc)
 
 static void fault(wd1770_t *fdc, uint8_t flags, const char *desc)
 {
-    WD_LOGW("%s", desc);
+    WD_LOGW("%s", desc); (void)desc;
     fdc->status |= flags;
     fdc->status &= ~WD1770_STATUS_BUSY;
     fdc->delay_cycles = 0;
@@ -402,10 +408,17 @@ void wd1770_reset(wd1770_t *fdc)
     fdc->buf_pos     = 0;
     fdc->buf_count   = 0;
 
+    /* Start with index pulse already active so the DFS hardware-detect
+     * read of status (AND #$03) sees INDEX (bit 1) = 1 immediately.
+     * The pulse will drop after INDEX_PULSE_CYCLES and repeat every
+     * INDEX_PERIOD_CYCLES thereafter. */
+    fdc->index_pulse  = true;
+    fdc->index_cycles = INDEX_PULSE_CYCLES;
+
     if (fdc->motor_on)
         fdc->status |= WD1770_STATUS_MOTOR_ON;
 
-    WD_LOGD("reset");
+    WD_LOGD("reset index_pulse=%d", fdc->index_pulse);
 }
 
 uint8_t wd1770_read(wd1770_t *fdc, uint8_t reg)
@@ -419,8 +432,16 @@ uint8_t wd1770_read(wd1770_t *fdc, uint8_t reg)
                     s |= WD1770_STATUS_TRACK0;
                 if (fdc->motor_on)
                     s |= WD1770_STATUS_SPIN_UP;
+                /* INDEX pulse: bit 1 toggles once per disk revolution.
+                 * The DFS 1770 ROM checks (status & 0x03) != 0 to confirm
+                 * a disk is spinning.  We assert INDEX whenever not busy,
+                 * which satisfies the DFS detect without needing exact
+                 * revolution timing.  When busy, use the toggling pulse. */
+                if (fdc->index_pulse || !(fdc->status & WD1770_STATUS_BUSY))
+                    s |= WD1770_STATUS_INDEX;
             }
-            WD_LOGD("read status -> %02X", s);
+            WD_LOGD("read status base=%02X type1=%d idx=%d motor=%d -> %02X",
+                    fdc->status, fdc->type1_status, fdc->index_pulse, fdc->motor_on, s);
             return s;
         }
         case 1:
@@ -502,6 +523,19 @@ void wd1770_write(wd1770_t *fdc, uint8_t reg, uint8_t val)
 
 void wd1770_tick(wd1770_t *fdc, int32_t cycles)
 {
+    /* --- INDEX pulse generator ---
+     * Toggle the index pulse once per revolution.  The pulse stays high for
+     * INDEX_PULSE_CYCLES then low for (INDEX_PERIOD_CYCLES - INDEX_PULSE_CYCLES).
+     * This is independent of any command in progress. */
+    fdc->index_cycles -= cycles;
+    if (fdc->index_cycles <= 0) {
+        fdc->index_pulse = !fdc->index_pulse;
+        fdc->index_cycles += fdc->index_pulse
+            ? INDEX_PULSE_CYCLES
+            : (INDEX_PERIOD_CYCLES - INDEX_PULSE_CYCLES);
+    }
+
+    /* --- Command state machine --- */
     if (fdc->delay_cycles <= 0)
         return;
 

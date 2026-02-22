@@ -127,6 +127,15 @@ typedef struct {
     /* Simplified timing: counts down in wd1770_tick(), triggers callback at 0 */
     int32_t  delay_cycles;
 
+    /* INDEX pulse counter.
+     * The WD1770 receives one INDEX pulse per disk revolution (~300 RPM →
+     * 200 ms period).  At 2 MHz this is 400000 cycles/revolution.
+     * The INDEX bit (bit 1) in Type-I status is set for a short pulse (~2 ms
+     * = 4000 cycles) once per revolution.  The DFS uses this to confirm a
+     * disk is spinning before issuing commands. */
+    int32_t  index_cycles;   /* cycles until next index pulse edge */
+    bool     index_pulse;    /* current index pulse state */
+
     /* Callbacks */
     wd1770_callbacks_t cb;
 } wd1770_t;

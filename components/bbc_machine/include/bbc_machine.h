@@ -108,6 +108,19 @@ typedef struct {
      * (command complete) from DRQ (data byte ready). bit7=0 → DRQ active. */
     bool             fdc_drq_state;
 
+    /* Last value written to the &FE84 drive-select latch.
+     * Bits 0-3 are readable back (drive/side/density selects). */
+    uint8_t          fdc_latch;
+
+    /* Disk I/O callbacks — stored separately from fdc.cb so that
+     * fdc.cb.user_ctx can always point to 'm' (needed by fdc_irq/fdc_drq).
+     * bbc_machine_mount_disk() stores the host callbacks here; the FDC
+     * wrapper functions (disk_read_wrap etc.) forward to these. */
+    int  (*disk_read_sector) (void *, uint8_t, uint8_t, uint8_t, uint8_t, uint8_t, uint8_t *, uint16_t *);
+    int  (*disk_write_sector)(void *, uint8_t, uint8_t, uint8_t, uint8_t, uint8_t, bool, const uint8_t *, uint16_t);
+    void (*disk_seek)        (void *, uint8_t, uint8_t);
+    void  *disk_ctx;
+
     /* Video framebuffer output (set by caller before init) */
     bbc_video_output_t *fb_output;   /* NULL = no display */
 

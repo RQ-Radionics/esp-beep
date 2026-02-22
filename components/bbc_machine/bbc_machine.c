@@ -7,6 +7,7 @@
 
 #include "bbc_machine.h"
 #include <string.h>
+#include <stdio.h>
 
 /* ======================================================================
  * Forward declarations for static callback functions
@@ -26,6 +27,11 @@ static void     uv_irq     (void *ctx, bool state);
 /* wd1770 callbacks */
 static void     fdc_irq(void *ctx, bool state);
 static void     fdc_drq(void *ctx, bool state);
+
+/* wd1770 disk I/O wrappers (forward to m->disk_* callbacks) */
+static int      fdc_read_sector (void *ctx, uint8_t drive, uint8_t track, uint8_t sector, uint8_t side, uint8_t density, uint8_t *buf, uint16_t *len);
+static int      fdc_write_sector(void *ctx, uint8_t drive, uint8_t track, uint8_t sector, uint8_t side, uint8_t density, bool deleted, const uint8_t *buf, uint16_t len);
+static void     fdc_seek        (void *ctx, uint8_t drive, uint8_t track);
 
 /* video vsync callback */
 static void     video_vsync_cb(void *ctx, bool state);
@@ -105,11 +111,15 @@ void bbc_machine_init(bbc_machine_t *m,
     }
 
     /* ----- WD1770 FDC ---------------------------------------------- */
+    /* IMPORTANT: user_ctx is always 'm' so that fdc_irq / fdc_drq can
+     * safely cast ctx to bbc_machine_t*.  Disk I/O callbacks are stored
+     * separately in m->disk_* and forwarded via fdc_read_sector et al.
+     * Never replace user_ctx — use bbc_machine_mount_disk() instead. */
     {
         wd1770_callbacks_t cb = {
-            .read_sector  = NULL,   /* mounted later via bbc_machine_mount_disk */
-            .write_sector = NULL,
-            .seek         = NULL,
+            .read_sector  = fdc_read_sector,
+            .write_sector = fdc_write_sector,
+            .seek         = fdc_seek,
             .irq          = fdc_irq,
             .drq          = fdc_drq,
             .user_ctx     = m,
@@ -145,8 +155,17 @@ void bbc_machine_init(bbc_machine_t *m,
     bbc_memory_set_range_callbacks(m->mem, 0xFE60, 16,
         io_uservia_read, io_uservia_write, m);
 
-    /* WD1770 FDC: &FE80–&FE84 (&FE84 = drive/side/density select + DRQ latch) */
-    bbc_memory_set_range_callbacks(m->mem, 0xFE80, 5,
+    /* WD1770 FDC: &FE80–&FE87
+     * The WD1770 chip select on the Acorn 1770 board ignores A2, so the four
+     * chip registers at &FE80-&FE83 mirror at &FE84-&FE87 — except that
+     * &FE84 is intercepted by the external drive-select latch before reaching
+     * the chip.  The DFS ROM accesses:
+     *   &FE80 command/status   (and mirrors at &FE84 — but &FE84 is the latch)
+     *   &FE85 track reg        mirror of &FE81
+     *   &FE86 sector reg       mirror of &FE82
+     *   &FE87 data reg         mirror of &FE83
+     */
+    bbc_memory_set_range_callbacks(m->mem, 0xFE80, 8,
         io_fdc_read, io_fdc_write, m);
 
     /* ROMSEL: &FE30 (write selects sideways ROM slot; read returns current slot) */
@@ -273,10 +292,13 @@ void bbc_machine_mount_disk(bbc_machine_t *m, uint8_t drive,
     void (*seek)        (void *, uint8_t, uint8_t),
     void *disk_ctx) {
     (void)drive; /* wd1770 callbacks are chip-global; drive is passed per command */
-    m->fdc.cb.read_sector  = read_sector;
-    m->fdc.cb.write_sector = write_sector;
-    m->fdc.cb.seek         = seek;
-    m->fdc.cb.user_ctx     = disk_ctx;
+    /* Store disk I/O callbacks in the machine struct.  The FDC wrapper
+     * functions (fdc_read_sector et al.) forward to these.  We do NOT
+     * touch fdc.cb.user_ctx — that always points to 'm'. */
+    m->disk_read_sector  = read_sector;
+    m->disk_write_sector = write_sector;
+    m->disk_seek         = seek;
+    m->disk_ctx          = disk_ctx;
 }
 
 /* ======================================================================
@@ -399,9 +421,52 @@ static void fdc_drq(void *ctx, bool state) {
      *   &FE84 bit 7 = 0 → DRQ active  → read/write next data byte
      *   &FE84 bit 7 = 1 → INTRQ only  → command finished
      * We track DRQ state so io_fdc_read() can return the correct value.
+     * DRQ also triggers NMI on the BBC 1770 interface board.
      */
     bbc_machine_t *m = (bbc_machine_t *)ctx;
     m->fdc_drq_state = state;
+    if (state) {
+        bbc_cpu_nmi(m->cpu);
+    }
+}
+
+/* ======================================================================
+ * WD1770 disk I/O wrappers
+ *
+ * These are always installed as the FDC's read/write/seek callbacks.
+ * ctx == m (bbc_machine_t *) always — safe to dereference.
+ * The actual disk-image callbacks are stored in m->disk_* and called
+ * with m->disk_ctx, which may be NULL if no disk is mounted.
+ * ====================================================================== */
+
+static int fdc_read_sector(void *ctx,
+                            uint8_t drive, uint8_t track, uint8_t sector,
+                            uint8_t side, uint8_t density,
+                            uint8_t *buf, uint16_t *len)
+{
+    bbc_machine_t *m = (bbc_machine_t *)ctx;
+    if (!m->disk_read_sector) return -1;
+    return m->disk_read_sector(m->disk_ctx,
+                               drive, track, sector, side, density, buf, len);
+}
+
+static int fdc_write_sector(void *ctx,
+                             uint8_t drive, uint8_t track, uint8_t sector,
+                             uint8_t side, uint8_t density, bool deleted,
+                             const uint8_t *buf, uint16_t len)
+{
+    bbc_machine_t *m = (bbc_machine_t *)ctx;
+    if (!m->disk_write_sector) return -1;
+    return m->disk_write_sector(m->disk_ctx,
+                                drive, track, sector, side, density, deleted,
+                                buf, len);
+}
+
+static void fdc_seek(void *ctx, uint8_t drive, uint8_t track)
+{
+    bbc_machine_t *m = (bbc_machine_t *)ctx;
+    if (m->disk_seek)
+        m->disk_seek(m->disk_ctx, drive, track);
 }
 
 /* ======================================================================
@@ -473,33 +538,56 @@ static void io_uservia_write(uint16_t addr, uint8_t val, void *ctx) {
  */
 static uint8_t io_fdc_read(uint16_t addr, void *ctx) {
     bbc_machine_t *m = (bbc_machine_t *)ctx;
-    uint8_t reg = (uint8_t)(addr - 0xFE80);
-    if (reg <= 3) {
-        return wd1770_read(&m->fdc, reg);
-    }
-    if (reg == 4) {
+    uint8_t offset = (uint8_t)(addr - 0xFE80);
+
+    if (offset == 4) {
         /*
-         * &FE84 read: Acorn 1770 DRQ latch.
-         * bit 7 = 0 → DRQ asserted (data byte ready / wanted)
-         * bit 7 = 1 → no DRQ (INTRQ or idle)
-         * All other bits are undefined / pull-up (0xFF).
+         * &FE84: Acorn 1770 drive-select / DRQ latch.
+         * On the real board, bit 7 of the latch reflects the inverted DRQ
+         * line (0 = DRQ active, 1 = no DRQ).  The remaining bits read back
+         * the last value written to the latch (drive/side/density selects).
+         * The DFS NMI handler also spins on bit 0 of this register waiting
+         * for the drive-ready signal to clear.
+         *
+         * bit 7 = 0 → DRQ asserted
+         * bit 7 = 1 → no DRQ
+         * bits 0-3 = last written latch value (drive/side/density)
          */
-        return m->fdc_drq_state ? 0x7F : 0xFF;
+        uint8_t drq_bit = m->fdc_drq_state ? 0x00 : 0x80;
+        return drq_bit | (m->fdc_latch & 0x7F);
     }
-    return 0xFF;
+
+    /* All other offsets access WD1770 registers via (addr & 3):
+     *   0 / 4 → status (cmd on write)
+     *   1 / 5 → track
+     *   2 / 6 → sector
+     *   3 / 7 → data
+     * offset 4 is handled above; offsets 0-3 and 5-7 fall through here. */
+    return wd1770_read(&m->fdc, offset & 3);
 }
+
 static void io_fdc_write(uint16_t addr, uint8_t val, void *ctx) {
     bbc_machine_t *m = (bbc_machine_t *)ctx;
-    uint8_t reg = (uint8_t)(addr - 0xFE80);
-    if (reg <= 3) {
-        wd1770_write(&m->fdc, reg, val);
-    } else if (reg == 4) {
-        /* Drive select latch */
+    uint8_t offset = (uint8_t)(addr - 0xFE80);
+
+    if (offset == 4) {
+        /* Drive-select latch &FE84.
+         * Acorn 1770 board latch bits:
+         *   bit 0 = drive 0 select (active high)
+         *   bit 1 = drive 1 select (active high)
+         *   bit 2 = side select (0=side 0)
+         *   bit 3 = density (0=FM, 1=MFM)
+         */
+        m->fdc_latch = val;
         uint8_t drive   = (val & 0x01) ? 0 : 1;   /* bit 0 = drive 0 */
         uint8_t side    = (val >> 2) & 1;
         uint8_t density = (val >> 3) & 1;
         wd1770_select(&m->fdc, drive, side, density);
+        return;
     }
+
+    /* WD1770 registers, mirrored every 4 bytes */
+    wd1770_write(&m->fdc, offset & 3, val);
 }
 
 /* ROMSEL — &FE30: sideways ROM bank select */
