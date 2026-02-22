@@ -16,7 +16,7 @@
 #  define SV_LOGW(fmt, ...) ESP_LOGW("sysvia", fmt, ##__VA_ARGS__)
 #else
 #  include <stdio.h>
-#  define SV_LOGD(fmt, ...) /* no-op */
+#  define SV_LOGD(fmt, ...) ((void)0)
 #  define SV_LOGW(fmt, ...) fprintf(stderr, "sysvia WARN: " fmt "\n", ##__VA_ARGS__)
 #endif
 
@@ -87,6 +87,12 @@ static void sysvia_update_latch(bbc_sysvia_t *sv, uint8_t portb_val)
         SV_LOGD("IC32 = %02X", sv->latch);
         if (sv->cb.latch_changed)
             sv->cb.latch_changed(sv->cb.user_ctx, sv->latch);
+
+        /* IC32 bit 2 = tape motor relay (active HIGH) */
+        bool motor_old = !!(old_latch  & (1u << BBC_LATCH_TAPE_MOTOR));
+        bool motor_new = !!(sv->latch  & (1u << BBC_LATCH_TAPE_MOTOR));
+        if (motor_old != motor_new && sv->cb.motor_changed)
+            sv->cb.motor_changed(sv->cb.user_ctx, motor_new);
     }
 }
 
@@ -200,14 +206,9 @@ static void sysvia_irq(void *user_ctx, bool state)
 
 static void sysvia_control_out(void *user_ctx, uint8_t line, bool state)
 {
-    bbc_sysvia_t *sv = (bbc_sysvia_t *)user_ctx;
-    if (line == 1) {
-        /* CB2 = tape motor control (active HIGH = motor on) */
-        SV_LOGD("CB2 (motor) %s", state ? "ON" : "OFF");
-        if (sv->cb.motor_changed)
-            sv->cb.motor_changed(sv->cb.user_ctx, state);
-    }
-    /* CA2 (line==0) is handled separately in sysvia_update_ca2 */
+    /* CA2 (line==0) is driven by sysvia_update_ca2; ignore here.
+     * CB2 (line==1) is not used for motor control on Model B (motor is IC32 bit 2). */
+    (void)user_ctx; (void)line; (void)state;
 }
 
 /* -------------------------------------------------------------------------

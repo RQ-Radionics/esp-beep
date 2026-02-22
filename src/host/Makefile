@@ -7,7 +7,7 @@
 CC      := clang
 CFLAGS  := -std=c11 -Wall -Wextra -O2 -g
 CFLAGS  += $(shell sdl2-config --cflags)
-LDFLAGS := $(shell sdl2-config --libs) -framework CoreAudio -framework AudioToolbox
+LDFLAGS := $(shell sdl2-config --libs) -framework CoreAudio -framework AudioToolbox -lz
 
 ROOT    := ../..
 COMP    := $(ROOT)/components

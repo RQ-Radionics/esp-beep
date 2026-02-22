@@ -23,14 +23,14 @@ extern "C" {
 /* --------------------------------------------------------------------------
  * Addressable latch IC32 bit positions
  * -------------------------------------------------------------------------- */
-#define BBC_LATCH_SOUND_WE      0  /* Sound chip (SN76489) write enable — active LOW */
-#define BBC_LATCH_SPEECH_RD     1  /* Speech chip read (not implemented)              */
-#define BBC_LATCH_SPEECH_WR     2  /* Speech chip write (not implemented)             */
-#define BBC_LATCH_KB_AUTOSCAN   3  /* Keyboard auto-scan enable                       */
-#define BBC_LATCH_SCREEN_B0     4  /* Screen bank select bit 0 (Master 128)           */
-#define BBC_LATCH_SCREEN_B1     5  /* Screen bank select bit 1 (Master 128)           */
-#define BBC_LATCH_CAPS_LED      6  /* Caps Lock LED — active LOW                      */
-#define BBC_LATCH_SHIFT_LED     7  /* Shift Lock LED — active LOW                     */
+#define BBC_LATCH_SOUND_WE      0  /* Sound chip (SN76489) write enable — active LOW  */
+#define BBC_LATCH_SPEECH_RD     1  /* Speech chip read (not implemented)               */
+#define BBC_LATCH_TAPE_MOTOR    2  /* Cassette motor relay — active HIGH               */
+#define BBC_LATCH_KB_AUTOSCAN   3  /* Keyboard auto-scan enable                        */
+#define BBC_LATCH_SCREEN_B0     4  /* Screen bank select bit 0 (Master 128)            */
+#define BBC_LATCH_SCREEN_B1     5  /* Screen bank select bit 1 (Master 128)            */
+#define BBC_LATCH_CAPS_LED      6  /* Caps Lock LED — active LOW                       */
+#define BBC_LATCH_SHIFT_LED     7  /* Shift Lock LED — active LOW                      */
 
 /* --------------------------------------------------------------------------
  * Callbacks

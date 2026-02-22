@@ -32,8 +32,9 @@ static void     fdc_drq(void *ctx, bool state);
 /* tape callbacks and IO handlers */
 static void     tape_irq        (void *ctx, bool state);
 static void     sv_motor_changed(void *ctx, bool on);
-static uint8_t  io_acia_read    (uint16_t addr, void *ctx);
-static void     io_acia_write   (uint16_t addr, uint8_t val, void *ctx);
+static uint8_t  io_acia_read        (uint16_t addr, void *ctx);
+static void     io_acia_write       (uint16_t addr, uint8_t val, void *ctx);
+static void     io_serial_ula_write (uint16_t addr, uint8_t val, void *ctx);
 
 /* wd1770 disk I/O wrappers (forward to m->disk_* callbacks) */
 static int      fdc_read_sector (void *ctx, uint8_t drive, uint8_t track, uint8_t sector, uint8_t side, uint8_t density, uint8_t *buf, uint16_t *len);
@@ -184,9 +185,13 @@ void bbc_machine_init(bbc_machine_t *m,
     bbc_memory_set_read_callback (m->mem, 0xFE30, io_romsel_read,  m);
     bbc_memory_set_write_callback(m->mem, 0xFE30, io_romsel_write, m);
 
-    /* Serial ULA / ACIA: &FE08–&FE09 (tape interface) */
+    /* MC6850 ACIA: &FE08 (status/ctrl) &FE09 (data) */
     bbc_memory_set_range_callbacks(m->mem, 0xFE08, 2,
         io_acia_read, io_acia_write, m);
+
+    /* Serial ULA control: &FE10 (write-only).
+     * bit 0 = tape motor (1=ON), bits 2:1 = TX baud, bits 4:3 = RX baud. */
+    bbc_memory_set_write_callback(m->mem, 0xFE10, io_serial_ula_write, m);
 }
 
 /* ======================================================================
@@ -678,6 +683,24 @@ static uint8_t io_acia_read(uint16_t addr, void *ctx) {
 static void io_acia_write(uint16_t addr, uint8_t val, void *ctx) {
     bbc_machine_t *m = (bbc_machine_t *)ctx;
     bbc_tape_write(&m->tape, (uint8_t)(addr & 1), val);
+}
+
+/* ======================================================================
+ * Serial ULA control register — &FE10 (write only)
+ *
+ * BBC Micro Serial ULA (IC57):
+ *   bit 0   = tape motor relay  (1=ON, 0=OFF)
+ *   bits 2:1 = transmit baud rate select
+ *   bits 4:3 = receive baud rate select
+ *   bits 7:5 = other (RS423 control, ignored here)
+ * ====================================================================== */
+
+static void io_serial_ula_write(uint16_t addr, uint8_t val, void *ctx) {
+    (void)addr;
+    bbc_machine_t *m = (bbc_machine_t *)ctx;
+    bool motor_on = (val & 0x01) != 0;
+    fprintf(stderr, "[serial_ula] FE10 write %02X  motor=%s\n", val, motor_on ? "ON" : "OFF");
+    bbc_tape_set_motor(&m->tape, motor_on);
 }
 
 /* ======================================================================

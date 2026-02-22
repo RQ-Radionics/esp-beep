@@ -64,6 +64,7 @@ typedef struct {
 
     /* Motor state */
     bool motor_on;
+    bool running;    /* true once motor has been turned on at least once */
 
     /* ACIA state */
     uint8_t  acia_control;   /* last written control byte */
