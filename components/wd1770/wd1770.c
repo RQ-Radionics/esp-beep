@@ -29,8 +29,8 @@
 #  define WD_LOGW(fmt, ...) ESP_LOGW("wd1770", fmt, ##__VA_ARGS__)
 #else
 #  include <stdio.h>
-#  define WD_LOGD(fmt, ...) ((void)0)
-#  define WD_LOGW(fmt, ...) ((void)0)
+#  define WD_LOGD(fmt, ...) fprintf(stderr, "[wd] " fmt "\n", ##__VA_ARGS__)
+#  define WD_LOGW(fmt, ...) fprintf(stderr, "[wd] WARN: " fmt "\n", ##__VA_ARGS__)
 #endif
 
 /* Delay constants (in 2 MHz BBC clock cycles, as in B-em) */
@@ -54,9 +54,18 @@
 
 static void set_intrq(wd1770_t *fdc, bool state)
 {
+    bool was = fdc->intrq;
     fdc->intrq = state;
-    if (fdc->cb.irq)
+    /* Only fire the callback on a rising edge (false→true transition).
+     * This models the edge-triggered NMI on the BBC: once the /NMI line
+     * has gone low (INTRQ asserted) and been serviced, it won't re-trigger
+     * until INTRQ is first cleared (status register read) and then asserted
+     * again.  Suppressing repeated asserts prevents the CPU from receiving
+     * a storm of NMIs from the INDEX pulse train. */
+    if (state && !was && fdc->cb.irq)
         fdc->cb.irq(fdc->cb.user_ctx, state);
+    else if (!state && fdc->cb.irq)
+        fdc->cb.irq(fdc->cb.user_ctx, state);  /* always propagate clear */
 }
 
 static void set_drq(wd1770_t *fdc, bool state)
@@ -526,13 +535,31 @@ void wd1770_tick(wd1770_t *fdc, int32_t cycles)
     /* --- INDEX pulse generator ---
      * Toggle the index pulse once per revolution.  The pulse stays high for
      * INDEX_PULSE_CYCLES then low for (INDEX_PERIOD_CYCLES - INDEX_PULSE_CYCLES).
-     * This is independent of any command in progress. */
+     * This is independent of any command in progress.
+     *
+     * When the chip is idle (not BUSY) and the motor is on, the WD1770
+     * asserts INTRQ on the rising edge of each INDEX pulse.  The BBC DFS
+     * relies on this to wake up from its "wait for idle" spin loop ($8E85)
+     * after a seek/step command completes. */
+    /* Use a while loop so that large cycle counts don't skip transitions. */
     fdc->index_cycles -= cycles;
-    if (fdc->index_cycles <= 0) {
+    while (fdc->index_cycles <= 0) {
+        bool was_pulse = fdc->index_pulse;
         fdc->index_pulse = !fdc->index_pulse;
         fdc->index_cycles += fdc->index_pulse
             ? INDEX_PULSE_CYCLES
             : (INDEX_PERIOD_CYCLES - INDEX_PULSE_CYCLES);
+        /* Rising edge (LOW→HIGH) while idle → assert INTRQ once.
+         * Guard against re-asserting if INTRQ is already pending (i.e. the
+         * previous NMI handler hasn't cleared it yet by reading the status
+         * register).  Without this guard the while-loop above can generate
+         * multiple rising edges in a single tick and flood the CPU with NMIs. */
+        if (!was_pulse && fdc->index_pulse &&
+            fdc->motor_on && !(fdc->status & WD1770_STATUS_BUSY) &&
+            !fdc->intrq) {
+            WD_LOGD("INDEX rising edge while idle → INTRQ");
+            set_intrq(fdc, true);
+        }
     }
 
     /* --- Command state machine --- */

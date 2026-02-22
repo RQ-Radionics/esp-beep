@@ -97,7 +97,8 @@ static int disk_read(void *ctx,
     disk_ctx_t *d = (disk_ctx_t *)ctx;
     if (!d || !d->fp) return -1;
     if (track >= d->n_tracks || sector >= BBC_SECTORS_PER_TRACK) return -1;
-    if (!d->is_dsd && side != 0) return -1;
+    /* For SSD (single-sided), force side=0. */
+    if (!d->is_dsd) side = 0;
 
     long off = d->is_dsd
         ? (long)((track * 2 + side) * BBC_SECTORS_PER_TRACK + sector) * BBC_SECTOR_SIZE
@@ -118,7 +119,7 @@ static int disk_write(void *ctx,
     disk_ctx_t *d = (disk_ctx_t *)ctx;
     if (!d || !d->fp || d->read_only) return -1;
     if (track >= d->n_tracks || sector >= BBC_SECTORS_PER_TRACK) return -1;
-    if (!d->is_dsd && side != 0) return -1;
+    if (!d->is_dsd) side = 0;
     if (len != BBC_SECTOR_SIZE) return -1;
 
     long off = d->is_dsd

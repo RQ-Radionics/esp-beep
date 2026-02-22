@@ -260,6 +260,24 @@ void bbc_machine_break(bbc_machine_t *m, bool shift_held) {
  * ====================================================================== */
 
 int bbc_machine_step(bbc_machine_t *m) {
+    /* PC watchdog: print PC every ~2M cycles so we can see where it's spinning */
+    static int32_t watchdog_cycles = 0;
+    static uint16_t last_reported_pc = 0xFFFF; (void)last_reported_pc;
+    watchdog_cycles--;
+    if (watchdog_cycles <= 0) {
+        watchdog_cycles = 2000000;
+        uint16_t pc = bbc_cpu_get_pc(m->cpu);
+        uint8_t *ram = bbc_memory_get_ram(m->mem);
+        fprintf(stderr, "[wdog] PC=$%04X A2=$%02X A5=$%02X CF=$%02X fdc_busy=%d drq=%d\n",
+                pc,
+                ram ? ram[0xA2] : 0xFF,
+                ram ? ram[0xA5] : 0xFF,
+                ram ? ram[0xCF] : 0xFF,
+                (m->fdc.status & 0x01) != 0,
+                m->fdc_drq_state);
+        last_reported_pc = pc;
+    }
+
     int cycles = bbc_cpu_step(m->cpu);
     if (cycles <= 0) cycles = 1;
 
@@ -406,10 +424,10 @@ static void uv_irq(void *ctx, bool state) {
 
 static void fdc_irq(void *ctx, bool state) {
     bbc_machine_t *m = (bbc_machine_t *)ctx;
+    fprintf(stderr, "[fdc] INTRQ %s (cpu=%p)\n", state ? "assert" : "clear", (void*)m->cpu);
     if (state) {
         bbc_cpu_nmi(m->cpu);
     }
-    /* NMI is edge-triggered — no clear needed */
 }
 
 static void fdc_drq(void *ctx, bool state) {
@@ -424,6 +442,7 @@ static void fdc_drq(void *ctx, bool state) {
      * DRQ also triggers NMI on the BBC 1770 interface board.
      */
     bbc_machine_t *m = (bbc_machine_t *)ctx;
+    fprintf(stderr, "[fdc] DRQ %s\n", state ? "assert" : "clear");
     m->fdc_drq_state = state;
     if (state) {
         bbc_cpu_nmi(m->cpu);
@@ -528,66 +547,92 @@ static void io_uservia_write(uint16_t addr, uint8_t val, void *ctx) {
 }
 
 /*
- * WD1770 FDC — &FE80–&FE83 (chip registers), &FE84 (drive select latch)
+ * WD1770 FDC — Acorn 1770 board address decode (BBC Model B daughter board)
  *
- * Drive select latch (&FE84) bits (Acorn 8271 compatible interface):
- *   bit 0  drive 0 select (active HIGH)
- *   bit 1  drive 1 select (active HIGH)
- *   bit 2  side select (0=side 0, 1=side 1)
- *   bit 3  density  (0=FM/single, 1=MFM/double)
+ * Matches b-em FDC_ACORN decode exactly (src/wd1770.c):
+ *
+ *   addr & 0x04 == 0  ($FE80–$FE83): drive-select / control latch (write)
+ *                                     reads return floating bus (0xFF)
+ *   addr & 0x04 != 0  ($FE84–$FE87): WD1770 chip registers (read/write)
+ *
+ * Control latch ($FE80) bits — b-em wd1770_wctl_acorn():
+ *   bit 1 = drive select  (0=drive 0, 1=drive 1)
+ *   bit 2 = side select   (0=side 0, 1=side 1)
+ *   bit 3 = density       (0=FM/single, 1=MFM/double)  [b-em inverts: 1→FM]
+ *   bit 5 = /reset        (active LOW; 0 resets chip)
+ *
+ * WD1770 chip registers at $FE84–$FE87 (reg = addr & 0x03):
+ *   0 = command (write) / status (read)  — reading clears INTRQ
+ *   1 = track register
+ *   2 = sector register
+ *   3 = data register
+ *
+ * The NMI handler ($0D00, copied from ROM $8FD2) reads $FE84 to check
+ * DRQ (bit 7 of the external latch on the real board).  We model this
+ * as: reading $FE84 (reg 0, status) clears INTRQ AND returns a synthetic
+ * DRQ bit so the NMI handler routes correctly.
+ *
+ * Note: the DFS ROM detects the chip at $9104 (STA/CMP $FE85 = track reg)
+ * then reads $FE80 at $9115 expecting non-zero to confirm a disc is spinning.
+ * In b-em $FE80 reads as floating bus (0xFF); AND #$03 = 0x03 ≠ 0, passes.
+ * We return 0xFF for all latch reads to match this behaviour.
  */
 static uint8_t io_fdc_read(uint16_t addr, void *ctx) {
     bbc_machine_t *m = (bbc_machine_t *)ctx;
-    uint8_t offset = (uint8_t)(addr - 0xFE80);
+    uint16_t pc = bbc_cpu_get_pc(m->cpu);
 
-    if (offset == 4) {
-        /*
-         * &FE84: Acorn 1770 drive-select / DRQ latch.
-         * On the real board, bit 7 of the latch reflects the inverted DRQ
-         * line (0 = DRQ active, 1 = no DRQ).  The remaining bits read back
-         * the last value written to the latch (drive/side/density selects).
-         * The DFS NMI handler also spins on bit 0 of this register waiting
-         * for the drive-ready signal to clear.
-         *
-         * bit 7 = 0 → DRQ asserted
-         * bit 7 = 1 → no DRQ
-         * bits 0-3 = last written latch value (drive/side/density)
-         */
-        uint8_t drq_bit = m->fdc_drq_state ? 0x00 : 0x80;
-        return drq_bit | (m->fdc_latch & 0x7F);
+    if (!(addr & 0x04)) {
+        /* $FE80–$FE83: latch area — floating bus on real hardware.
+         * Return 0xFF so the DFS detect (LDA $FE80 / AND #$03) sees
+         * a non-zero value and concludes a disc is spinning. */
+        fprintf(stderr, "[fdc] R $%04X(latch/float)=FF @ PC=$%04X\n", addr, pc);
+        return 0xFF;
     }
 
-    /* All other offsets access WD1770 registers via (addr & 3):
-     *   0 / 4 → status (cmd on write)
-     *   1 / 5 → track
-     *   2 / 6 → sector
-     *   3 / 7 → data
-     * offset 4 is handled above; offsets 0-3 and 5-7 fall through here. */
-    return wd1770_read(&m->fdc, offset & 3);
+    /* $FE84–$FE87: WD1770 chip registers (reg = addr & 0x03).
+     *
+     * $FE84 reads the WD1770 status register (same as $FE80 on the chip,
+     * since A2 is ignored by the chip select).  The DFS NMI handler reads
+     * $FE84 to get the status and acknowledge INTRQ.
+     *
+     * We clear fdc->intrq here so the INDEX-pulse edge guard allows the
+     * next INDEX INTRQ to fire. */
+    uint8_t reg = addr & 0x03;
+    uint8_t r = wd1770_read(&m->fdc, reg);  /* reg 0 → status, clears INTRQ */
+    if (reg == 0) {
+        m->fdc.intrq = false;
+    }
+    static const char *rnames[] = {"status","track","sector","data"};
+    fprintf(stderr, "[fdc] R $%04X(%s)=%02X @ PC=$%04X\n",
+            addr, rnames[reg], r, pc);
+    return r;
 }
 
 static void io_fdc_write(uint16_t addr, uint8_t val, void *ctx) {
     bbc_machine_t *m = (bbc_machine_t *)ctx;
-    uint8_t offset = (uint8_t)(addr - 0xFE80);
+    uint16_t pc = bbc_cpu_get_pc(m->cpu);
 
-    if (offset == 4) {
-        /* Drive-select latch &FE84.
-         * Acorn 1770 board latch bits:
-         *   bit 0 = drive 0 select (active high)
-         *   bit 1 = drive 1 select (active high)
-         *   bit 2 = side select (0=side 0)
-         *   bit 3 = density (0=FM, 1=MFM)
-         */
-        m->fdc_latch = val;
-        uint8_t drive   = (val & 0x01) ? 0 : 1;   /* bit 0 = drive 0 */
+    if (!(addr & 0x04)) {
+        /* $FE80–$FE83: drive-select / control latch (b-em wd1770_wctl_acorn).
+         * bit 1 = drive select  (0=drive 0, 1=drive 1)
+         * bit 2 = side select   (0=side 0, 1=side 1)
+         * bit 3 = density       (0=FM, 1=MFM) */
+        m->fdc_latch    = val;
+        uint8_t drive   = (val >> 1) & 1;
         uint8_t side    = (val >> 2) & 1;
         uint8_t density = (val >> 3) & 1;
+        fprintf(stderr, "[fdc] W $%04X(latch)=%02X (drive=%d side=%d dens=%d) @ PC=$%04X\n",
+                addr, val, drive, side, density, pc);
         wd1770_select(&m->fdc, drive, side, density);
         return;
     }
 
-    /* WD1770 registers, mirrored every 4 bytes */
-    wd1770_write(&m->fdc, offset & 3, val);
+    /* $FE84–$FE87: WD1770 chip registers */
+    uint8_t reg = addr & 0x03;
+    static const char *wnames[] = {"cmd","track","sector","data"};
+    fprintf(stderr, "[fdc] W $%04X(%s)=%02X @ PC=$%04X\n",
+            addr, wnames[reg], val, pc);
+    wd1770_write(&m->fdc, reg, val);
 }
 
 /* ROMSEL — &FE30: sideways ROM bank select */
