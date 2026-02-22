@@ -296,13 +296,15 @@ int bbc_machine_step(bbc_machine_t *m) {
         watchdog_cycles = 2000000;
         uint16_t pc = bbc_cpu_get_pc(m->cpu);
         uint8_t *ram = bbc_memory_get_ram(m->mem);
-        fprintf(stderr, "[wdog] PC=$%04X A2=$%02X A5=$%02X CF=$%02X fdc_busy=%d drq=%d\n",
+        uint8_t acia_st = bbc_tape_read(&m->tape, 0); /* read ACIA status non-destructively */
+        fprintf(stderr, "[wdog] PC=$%04X C2=$%02X EA=$%02X 0278=$%02X ACIA_st=%02X irq(sv=%d uv=%d ac=%d)\n",
                 pc,
-                ram ? ram[0xA2] : 0xFF,
-                ram ? ram[0xA5] : 0xFF,
-                ram ? ram[0xCF] : 0xFF,
-                (m->fdc.status & 0x01) != 0,
-                m->fdc_drq_state);
+                ram ? ram[0xC2] : 0xFF,
+                ram ? ram[0xEA] : 0xFF,
+                ram ? ram[0x0278] : 0xFF, /* $0278 tape/serial config */
+                acia_st,
+                m->irq.sysvia, m->irq.uservia, m->irq.acia);
+        (void)acia_st;
         last_reported_pc = pc;
     }
 
@@ -719,6 +721,13 @@ static void tape_irq(void *ctx, bool state) {
     /* ACIA IRQ shares /IRQ line with VIA IRQs.
      * Track state so update_irq() can properly deassert the line
      * when no source is active (fixes: VIA clearing IRQ cancelled ACIA). */
+    static bool last_state = false;
+    if (state != last_state) {
+        last_state = state;
+        fprintf(stderr, "[acia] IRQ %s (sv=%d uv=%d)\n",
+                state ? "ASSERT" : "clear",
+                m->irq.sysvia, m->irq.uservia);
+    }
     m->irq.acia = state;
     update_irq(m);
 }
