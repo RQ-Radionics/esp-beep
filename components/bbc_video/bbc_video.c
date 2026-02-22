@@ -4,9 +4,7 @@
  * Integrates MC6845 CRTC + Video ULA + SAA5050 → framebuffer.
  *
  * MA+RA → RAM address (BBC Micro bitmap modes):
- *   ram_addr = ((MA & 0x1FFF) | ((RA & 0x07) << 13)) & 0x7FFF
- *
- * This creates a "rasterised" layout where scanlines are interleaved.
+ *   ram_addr = ((MA << 3) | (RA & 7)) & 0x7FFF   [= MA*8 + RA]
  *
  * Licence: zlib
  * Copyright (c) 2026 esp-beep project
@@ -73,11 +71,20 @@ static inline void write_pixel(uint8_t *fb, uint32_t stride,
 }
 
 /* --------------------------------------------------------------------------
- * BBC Micro MA+RA → RAM address bit-shuffle
+ * BBC Micro MA+RA → RAM address
+ *
+ * The CRTC outputs MA (14-bit memory address) and RA (row address / scanline
+ * within character, 3 bits used in bitmap modes).  The BBC Micro hardware
+ * maps these to a physical RAM address simply as:
+ *
+ *   ram_addr = (MA << 3) | (RA & 7)   [= MA * 8 + RA]
+ *
+ * with wrap at 0x8000 (32 KB screen RAM window).
+ * Reference: BeebEm Video.cpp line 1261 — "VideoState.Addr * 8".
  * -------------------------------------------------------------------------- */
 static inline uint32_t bbc_bitmap_ram_addr(uint16_t ma, uint8_t ra)
 {
-    return ((uint32_t)(ma & 0x1FFF) | ((uint32_t)(ra & 0x07) << 13)) & 0x7FFF;
+    return (((uint32_t)ma << 3) | ((uint32_t)(ra & 0x07))) & 0x7FFF;
 }
 
 /* --------------------------------------------------------------------------
@@ -213,12 +220,15 @@ void bbc_video_tick(bbc_video_t *video)
         uint8_t colours[8];
         int npx = bbc_video_ula_serialize(&video->ula, data_byte,
                                           colours, out.cursor);
-        int pixel_width = video->ula.crtc_2mhz ? 1 : 2;
-        int base_x = char_col * npx * pixel_width;
+        /* hsync_modifier: screen columns per RAM byte (BeebEm HSyncModifier).
+         * 2MHz clock → 8 cols/byte, 1MHz clock → 16 cols/byte. */
+        int hsync    = video->ula.crtc_2mhz ? 8 : 16;
+        int px_width = hsync / npx;   /* screen cols per logical pixel */
+        int base_x   = char_col * hsync;
         for (int px = 0; px < npx; px++) {
             bbc_rgb_t rgb = bbc_video_ula_colour(&video->ula, colours[px]);
-            int fx = base_x + px * pixel_width;
-            for (int d = 0; d < pixel_width; d++) {
+            int fx = base_x + px * px_width;
+            for (int d = 0; d < px_width; d++) {
                 int out_x = fx + d;
                 if (out_x >= (int)video->output.width) break;
                 write_pixel(fb, video->output.fb_stride, out_x, out_y, rgb,
@@ -247,8 +257,8 @@ static void render_bitmap_frame(bbc_video_t *video)
     uint16_t cursor_addr    = mc6845_get_cursor_addr(crtc);
     int cursor_start        = (int)(crtc->cursor_start & 0x1F);
     int cursor_end          = (int)(crtc->cursor_end   & 0x1F);
-    int pixel_width         = ula->crtc_2mhz ? 1 : 2;
-    int total_scanlines     = char_rows * scans_per_char;
+    int hsync           = ula->crtc_2mhz ? 8 : 16; /* screen cols per RAM byte */
+    int total_scanlines = char_rows * scans_per_char;
 
     if (chars_per_line == 0 || char_rows == 0 || total_scanlines == 0) return;
 
@@ -270,13 +280,13 @@ static void render_bitmap_frame(bbc_video_t *video)
                               crtc->cursor_blink_state;
 
                 uint8_t colours[8];
-                int npx = bbc_video_ula_serialize(ula, data_byte, colours, cursor);
-
-                int base_x = col * npx * pixel_width;
+                int npx     = bbc_video_ula_serialize(ula, data_byte, colours, cursor);
+                int px_width = hsync / npx;
+                int base_x   = col * hsync;
                 for (int px = 0; px < npx; px++) {
                     bbc_rgb_t rgb = bbc_video_ula_colour(ula, colours[px]);
-                    int fx = base_x + px * pixel_width;
-                    for (int d = 0; d < pixel_width; d++) {
+                    int fx = base_x + px * px_width;
+                    for (int d = 0; d < px_width; d++) {
                         int out_x = fx + d;
                         if (out_x >= (int)video->output.width) break;
                         write_pixel(fb, stride, out_x, out_y, rgb, fmt);
@@ -295,51 +305,56 @@ static void render_teletext_frame(bbc_video_t *video)
     uint32_t stride = video->output.fb_stride;
     bbc_fb_format_t fmt = video->output.format;
 
-    /* SAA5050 output: 40 cols × 12 px = 480 px wide, 25 rows × 20 sl = 500 sl tall.
-     * Centre horizontally in the framebuffer (typically 640 px wide).
-     * Map 500 logical scanlines → output height (typically 256), clamped. */
+    /* SAA5050 output: 40 cols × 12 px = 480 px wide.
+     * 25 rows × 10 line_counter values × 2 (internal doubling) = 500 scanlines.
+     * Centre horizontally in the framebuffer (typically 640 px wide). */
     int content_w  = SAA5050_COLS * SAA5050_PIXELS_PER_CHAR; /* 480 */
     int x_offset   = ((int)video->output.width - content_w) / 2;
     if (x_offset < 0) x_offset = 0;
 
     int total_scanlines = SAA5050_ROWS * SAA5050_SCANLINES_PER_ROW; /* 500 */
 
-    /* Clear framebuffer to background colour (index 0 = black) before rendering */
+    /* Clear framebuffer to black before rendering */
     memset(fb, 0, (size_t)stride * video->output.height);
+
+    /* Line pixel buffer: 40 chars × 12 pixels = 480 colour indices */
+    uint8_t line_pixels[SAA5050_COLS * SAA5050_PIXELS_PER_CHAR];
+
+    saa5050_reset_frame(tt);
 
     for (int row = 0; row < SAA5050_ROWS; row++) {
         saa5050_start_row(tt, (uint8_t)row);
 
-        for (int sl = 0; sl < SAA5050_SCANLINES_PER_ROW; sl++) {
-            int out_y = (row * SAA5050_SCANLINES_PER_ROW + sl)
-                        * (int)video->output.height / total_scanlines;
-            if (out_y < 0 || out_y >= (int)video->output.height) continue;
+        /* Gather RAM for this row */
+        uint8_t row_ram[SAA5050_COLS];
+        for (int col = 0; col < SAA5050_COLS; col++) {
+            uint32_t ra = (BBC_SCREEN_BASE_MODE7 +
+                           (uint32_t)(row * SAA5050_COLS + col)) & 0x7FFF;
+            row_ram[col] = (ra < video->ram_size)
+                           ? (video->system_ram[ra] & 0x7F) : 0x20;
+        }
 
-            saa5050_line_state_t ls;
-            saa5050_start_scanline(tt, &ls, (uint8_t)sl);
+        /* Render each line_counter value 0-9; write pixels twice (internal doubling) */
+        for (int lc = 0; lc < SAA5050_LINES_PER_ROW; lc++) {
+            saa5050_render_line(tt, row_ram, (uint8_t)lc, line_pixels);
 
-            for (int col = 0; col < SAA5050_COLS; col++) {
-                uint32_t ram_addr = (BBC_SCREEN_BASE_MODE7 +
-                                     (uint32_t)(row * SAA5050_COLS + col)) & 0x7FFF;
-                uint8_t code = 0x20;
-                if (ram_addr < video->ram_size)
-                    code = video->system_ram[ram_addr] & 0x7F;
+            /* Each lc maps to two output scanlines (sl = lc*2 and lc*2+1) */
+            for (int half = 0; half < 2; half++) {
+                int sl    = lc * 2 + half;
+                int out_y = (row * SAA5050_SCANLINES_PER_ROW + sl)
+                            * (int)video->output.height / total_scanlines;
+                if (out_y < 0 || out_y >= (int)video->output.height) continue;
 
-                uint8_t pixels[SAA5050_PIXELS_PER_CHAR];
-                saa5050_render_char(tt, &ls, code, pixels);
-
-                /* Pixel-exact: each character occupies exactly SAA5050_PIXELS_PER_CHAR
-                 * (12) output pixels, placed at x_offset + col * 12. */
-                int base_x = x_offset + col * SAA5050_PIXELS_PER_CHAR;
-
-                for (int px = 0; px < SAA5050_PIXELS_PER_CHAR; px++) {
-                    int fx = base_x + px;
+                for (int px = 0; px < content_w; px++) {
+                    int fx = x_offset + px;
                     if (fx < 0 || fx >= (int)video->output.width) continue;
-                    bbc_rgb_t rgb = bbc_video_ula_colour(ula, pixels[px]);
+                    bbc_rgb_t rgb = bbc_video_ula_colour(ula, line_pixels[px]);
                     write_pixel(fb, stride, fx, out_y, rgb, fmt);
                 }
             }
         }
+
+        saa5050_end_row(tt);
     }
 }
 
@@ -371,8 +386,8 @@ static RENDER_IRAM void render_bitmap_row(const bbc_video_t *video,
     uint16_t cursor_addr  = mc6845_get_cursor_addr(crtc);
     int cursor_start      = (int)(crtc->cursor_start & 0x1F);
     int cursor_end        = (int)(crtc->cursor_end   & 0x1F);
-    int pixel_width       = ula->crtc_2mhz ? 1 : 2;
-    int total_scanlines   = char_rows * scans_per_char;
+    int hsync           = ula->crtc_2mhz ? 8 : 16; /* screen cols per RAM byte */
+    int total_scanlines = char_rows * scans_per_char;
 
     /* Clear row to index 0 (black) */
     memset(out_pixels, 0, (size_t)out_width);
@@ -405,17 +420,17 @@ static RENDER_IRAM void render_bitmap_row(const bbc_video_t *video,
                       crtc->cursor_blink_state;
 
         uint8_t colours[8];
-        int npx = bbc_video_ula_serialize(ula, data_byte, colours, cursor);
-
-        int base_x = col * npx * pixel_width;
+        int npx      = bbc_video_ula_serialize(ula, data_byte, colours, cursor);
+        int px_width = hsync / npx;
+        int base_x   = col * hsync;
         for (int px = 0; px < npx; px++) {
             bbc_rgb_t rgb = bbc_video_ula_colour(ula, colours[px]);
             /* Convert rgb → index8 inline */
             uint8_t idx = (uint8_t)(((rgb.b ? 1 : 0) << 2) |
                                     ((rgb.g ? 1 : 0) << 1) |
                                      (rgb.r ? 1 : 0));
-            int fx = base_x + px * pixel_width;
-            for (int d = 0; d < pixel_width; d++) {
+            int fx = base_x + px * px_width;
+            for (int d = 0; d < px_width; d++) {
                 int out_x = fx + d;
                 if (out_x < 0 || out_x >= out_width) break;
                 out_pixels[out_x] = idx;
@@ -424,37 +439,36 @@ static RENDER_IRAM void render_bitmap_row(const bbc_video_t *video,
     }
 }
 
-/* Render one SAA5050 row + scanline into out_pixels.
+/* Render one SAA5050 row for line_counter lc into out_pixels.
  * Caller must have called saa5050_start_row(tt, row) first. */
 static RENDER_IRAM void render_teletext_scanline(const bbc_video_t *video,
-                                      saa5050_t *tt, int row, int sl,
+                                      saa5050_t *tt, int row, int lc,
                                       int x_offset, int out_width,
                                       uint8_t *out_pixels)
 {
     const bbc_video_ula_t *ula = &video->ula;
-    saa5050_line_state_t ls;
-    saa5050_start_scanline(tt, &ls, (uint8_t)sl);
 
+    /* Gather RAM for this row */
+    uint8_t row_ram[SAA5050_COLS];
     for (int col = 0; col < SAA5050_COLS; col++) {
-        uint32_t ram_addr = (BBC_SCREEN_BASE_MODE7 +
-                             (uint32_t)(row * SAA5050_COLS + col)) & 0x7FFF;
-        uint8_t code = 0x20;
-        if (ram_addr < video->ram_size)
-            code = video->system_ram[ram_addr] & 0x7F;
+        uint32_t ra = (BBC_SCREEN_BASE_MODE7 +
+                       (uint32_t)(row * SAA5050_COLS + col)) & 0x7FFF;
+        row_ram[col] = (ra < video->ram_size)
+                       ? (video->system_ram[ra] & 0x7F) : 0x20;
+    }
 
-        uint8_t pixels[SAA5050_PIXELS_PER_CHAR];
-        saa5050_render_char(tt, &ls, code, pixels);
+    uint8_t line_pixels[SAA5050_COLS * SAA5050_PIXELS_PER_CHAR];
+    saa5050_render_line(tt, row_ram, (uint8_t)lc, line_pixels);
 
-        int base_x = x_offset + col * SAA5050_PIXELS_PER_CHAR;
-        for (int px = 0; px < SAA5050_PIXELS_PER_CHAR; px++) {
-            int fx = base_x + px;
-            if (fx < 0 || fx >= out_width) continue;
-            bbc_rgb_t rgb = bbc_video_ula_colour(ula, pixels[px]);
-            uint8_t idx = (uint8_t)(((rgb.b ? 1 : 0) << 2) |
-                                    ((rgb.g ? 1 : 0) << 1) |
-                                     (rgb.r ? 1 : 0));
-            out_pixels[fx] = idx;
-        }
+    int content_w = SAA5050_COLS * SAA5050_PIXELS_PER_CHAR;
+    for (int px = 0; px < content_w; px++) {
+        int fx = x_offset + px;
+        if (fx < 0 || fx >= out_width) continue;
+        bbc_rgb_t rgb = bbc_video_ula_colour(ula, line_pixels[px]);
+        uint8_t idx = (uint8_t)(((rgb.b ? 1 : 0) << 2) |
+                                ((rgb.g ? 1 : 0) << 1) |
+                                 (rgb.r ? 1 : 0));
+        out_pixels[fx] = idx;
     }
 }
 
@@ -473,42 +487,44 @@ static RENDER_IRAM void render_teletext_row(const bbc_video_t *video,
     /* Clear row to 0 (black) */
     memset(out_pixels, 0, (size_t)out_width);
 
-    /* Find the (row, sl) that maps to out_y using the same forward formula as
-     * render_teletext_frame:  mapped_y = logical_sl * out_height / total_scanlines.
-     * render_frame writes multiple logical scanlines to the same out_y (nearest-
-     * neighbour upscale); the last one wins.  We must use the last match too. */
-    int target_row = -1, target_sl = -1;
+    /* Find (row, lc) that maps to out_y.
+     * Each lc maps to two physical scanlines (lc*2 and lc*2+1).
+     * Total logical scanlines = 25*20 = 500.
+     * Forward formula: mapped_y = lsl * out_height / total_scanlines. */
+    int target_row = -1, target_lc = -1;
     for (int lsl = 0; lsl < total_scanlines; lsl++) {
         int mapped = lsl * out_height / total_scanlines;
         if (mapped == out_y) {
             target_row = lsl / SAA5050_SCANLINES_PER_ROW;
-            target_sl  = lsl % SAA5050_SCANLINES_PER_ROW;
+            /* lsl within row = lsl % 20; lc = that / 2 */
+            target_lc  = (lsl % SAA5050_SCANLINES_PER_ROW) / 2;
             /* keep going — take the LAST lsl that maps to out_y */
         }
         if (mapped > out_y) break;
     }
     if (target_row < 0 || target_row >= SAA5050_ROWS) return;
 
-    /* Pre-pass: replay the last scanline of all rows before target_row to
-     * accumulate the SAA5050's double-height propagation state correctly. */
-    uint8_t dummy[SAA5050_PIXELS_PER_CHAR];
+    /* Pre-pass: scan all rows before target_row to accumulate DH state. */
+    saa5050_reset_frame(tt);
     for (int r = 0; r < target_row; r++) {
         saa5050_start_row(tt, (uint8_t)r);
-        saa5050_line_state_t ls;
-        saa5050_start_scanline(tt, &ls, (uint8_t)(SAA5050_SCANLINES_PER_ROW - 1));
+        uint8_t row_ram[SAA5050_COLS];
+        uint8_t dummy[SAA5050_COLS * SAA5050_PIXELS_PER_CHAR];
         for (int col = 0; col < SAA5050_COLS; col++) {
-            uint32_t ram_addr = (BBC_SCREEN_BASE_MODE7 +
-                                 (uint32_t)(r * SAA5050_COLS + col)) & 0x7FFF;
-            uint8_t code = 0x20;
-            if (ram_addr < video->ram_size)
-                code = video->system_ram[ram_addr] & 0x7F;
-            saa5050_render_char(tt, &ls, code, dummy);
+            uint32_t ra = (BBC_SCREEN_BASE_MODE7 +
+                           (uint32_t)(r * SAA5050_COLS + col)) & 0x7FFF;
+            row_ram[col] = (ra < video->ram_size)
+                           ? (video->system_ram[ra] & 0x7F) : 0x20;
         }
+        /* Render last lc only (to detect double_high1 for end_row) */
+        saa5050_render_line(tt, row_ram,
+                            (uint8_t)(SAA5050_LINES_PER_ROW - 1), dummy);
+        saa5050_end_row(tt);
     }
 
-    /* Render the target row + scanline */
+    /* Render the target row */
     saa5050_start_row(tt, (uint8_t)target_row);
-    render_teletext_scanline(video, tt, target_row, target_sl,
+    render_teletext_scanline(video, tt, target_row, target_lc,
                              x_offset, out_width, out_pixels);
 }
 
