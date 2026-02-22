@@ -715,7 +715,7 @@ static void io_serial_ula_write(uint16_t addr, uint8_t val, void *ctx) {
     (void)addr;
     (void)ctx;
     /* Baud rate and RS423/cassette select — not yet used, log only */
-    fprintf(stderr, "[serial_ula] FE10 write %02X\n", val);
+    (void)val; /* baud rate / RS423 select — not yet used */
 }
 
 /* ======================================================================
@@ -727,13 +727,6 @@ static void tape_irq(void *ctx, bool state) {
     /* ACIA IRQ shares /IRQ line with VIA IRQs.
      * Track state so update_irq() can properly deassert the line
      * when no source is active (fixes: VIA clearing IRQ cancelled ACIA). */
-    static bool last_state = false;
-    if (state != last_state) {
-        last_state = state;
-        fprintf(stderr, "[acia] IRQ %s (sv=%d uv=%d)\n",
-                state ? "ASSERT" : "clear",
-                m->irq.sysvia, m->irq.uservia);
-    }
     m->irq.acia = state;
     update_irq(m);
 }

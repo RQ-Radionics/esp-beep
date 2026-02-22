@@ -345,7 +345,7 @@ uint8_t bbc_tape_read(bbc_tape_t *tape, uint8_t reg)
         tape->rx_full = false;
         /* Update IRQ line */
         if (tape->irq_cb) tape->irq_cb(tape->irq_ctx, false);
-        TAPE_LOGI("RX %02X", d);
+        TAPE_LOGD("RX %02X", d);
         return d;
     }
 }
@@ -373,12 +373,12 @@ void bbc_tape_write(bbc_tape_t *tape, uint8_t reg, uint8_t val)
         if ((val & 0x03) == 0x03) {
             tape->rx_full = false;
             if (tape->irq_cb) tape->irq_cb(tape->irq_ctx, false);
-            TAPE_LOGI("ACIA master reset");
+            TAPE_LOGD("ACIA master reset");
         } else if (!old_irq_en && tape->irq_enabled && tape->rx_full) {
             /* IRQ just enabled and byte already waiting — assert IRQ now */
             if (tape->irq_cb) tape->irq_cb(tape->irq_ctx, true);
         }
-        TAPE_LOGI("ACIA ctrl=%02X rx_ie=%d", val, tape->irq_enabled);
+        TAPE_LOGD("ACIA ctrl=%02X rx_ie=%d", val, tape->irq_enabled);
     }
     /* TX data writes ignored (we only emulate RX) */
 }
@@ -410,7 +410,7 @@ void bbc_tape_tick(bbc_tape_t *tape, int cycles)
     tape->rx_is_carrier = blk->is_carrier;
 
     if (tape->cur_pos == 1)
-        TAPE_LOGI("delivering block %d (%d bytes)", tape->cur_block, blk->len);
+        TAPE_LOGD("delivering block %d (%d bytes)", tape->cur_block, blk->len);
     TAPE_LOGD("deliver block=%d pos=%d byte=%02X",
               tape->cur_block, tape->cur_pos - 1, tape->rx_data);
 
