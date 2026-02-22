@@ -57,8 +57,8 @@ dkms.conf
 # Editor
 .vscode
 
-# Beads issue tracker (dolt DB — local only, breaks PRs)
-.beads/dolt/
+# Beads issue tracker
+.beads
 
 # Host build output
 src/host/bbc-beep
