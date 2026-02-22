@@ -50,6 +50,7 @@
 #include "wd1770.h"
 #include "sn76489.h"
 #include "bbc_video.h"
+#include "bbc_tape.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -121,6 +122,9 @@ typedef struct {
     void (*disk_seek)        (void *, uint8_t, uint8_t);
     void  *disk_ctx;
 
+    /* Tape (UEF) */
+    bbc_tape_t       tape;
+
     /* Video framebuffer output (set by caller before init) */
     bbc_video_output_t *fb_output;   /* NULL = no display */
 
@@ -180,7 +184,13 @@ int bbc_machine_step(bbc_machine_t *m);
  * Mount a disk image on the WD1770.  Pass NULL callbacks to unmount.
  *   drive   0 or 1
  */
-void bbc_machine_mount_disk(bbc_machine_t *m, uint8_t drive,
+    /*
+     * Mount a UEF tape image.  Pass NULL path to unmount.
+     * Returns 0 on success, -1 on error.
+     */
+    int bbc_machine_mount_tape(bbc_machine_t *m, const char *uef_path);
+
+    void bbc_machine_mount_disk(bbc_machine_t *m, uint8_t drive,
     int  (*read_sector) (void *, uint8_t, uint8_t, uint8_t, uint8_t, uint8_t, uint8_t *, uint16_t *),
     int  (*write_sector)(void *, uint8_t, uint8_t, uint8_t, uint8_t, uint8_t, bool, const uint8_t *, uint16_t),
     void (*seek)        (void *, uint8_t, uint8_t),

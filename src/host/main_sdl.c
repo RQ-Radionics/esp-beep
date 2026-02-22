@@ -8,7 +8,8 @@
  *   - Disk images (.ssd / .dsd) loaded from argv[1]
  *
  * Build: make  (see Makefile)
- * Run:   ./bbc-beep [disk.ssd|disk.dsd]
+ * Run:   ./bbc-beep [disk.ssd|disk.dsd] [tape.uef]
+ *        Arguments can be given in any order; extension determines type.
  *
  * BBC colour palette (index 0-7): bit0=R bit1=G bit2=B
  */
@@ -360,34 +361,55 @@ int main(int argc, char *argv[])
     if (dfs_rom && dfs_size)
         bbc_machine_load_sideways_rom(s_machine, dfs_rom, dfs_size, 14);
 
-    /* --- Disk --------------------------------------------------------------- */
+    /* --- Disk + Tape -------------------------------------------------------- */
     memset(&s_disk, 0, sizeof(s_disk));
-    if (argc >= 2) {
-        const char *img = argv[1];
-        size_t nlen = strlen(img);
-        bool is_dsd = (nlen >= 4 &&
-                       (strcmp(img + nlen - 4, ".dsd") == 0 ||
-                        strcmp(img + nlen - 4, ".DSD") == 0));
-        s_disk.fp       = fopen(img, "r+b");
-        s_disk.is_dsd   = is_dsd;
-        s_disk.read_only = false;
-        if (!s_disk.fp) {
-            s_disk.fp        = fopen(img, "rb");
-            s_disk.read_only = true;
-        }
-        if (s_disk.fp) {
-            s_disk.n_tracks = disk_detect_tracks(s_disk.fp, is_dsd);
-            printf("[disk] %s (%s, %s, %u tracks)\n", img,
-                   is_dsd ? "DSD" : "SSD",
-                   s_disk.read_only ? "read-only" : "read-write",
-                   s_disk.n_tracks);
-            bbc_machine_mount_disk(s_machine, 0,
-                                   disk_read, disk_write, disk_seek,
-                                   &s_disk);
+
+    /* Helper: does 'path' end with 'ext' (case-insensitive)? */
+    #define HAS_EXT(path, ext) \
+        (strlen(path) >= strlen(ext) && \
+         strcasecmp((path) + strlen(path) - strlen(ext), (ext)) == 0)
+
+    for (int i = 1; i < argc; i++) {
+        const char *arg = argv[i];
+
+        if (HAS_EXT(arg, ".uef")) {
+            /* --- Tape image ------------------------------------------------ */
+            printf("[tape] mounting %s\n", arg);
+            if (bbc_machine_mount_tape(s_machine, arg) != 0)
+                fprintf(stderr, "[tape] Failed to load %s\n", arg);
+
+        } else if (HAS_EXT(arg, ".ssd") || HAS_EXT(arg, ".dsd")) {
+            /* --- Disk image ------------------------------------------------ */
+            if (s_disk.fp) {
+                fprintf(stderr, "[disk] Only one disk image supported; ignoring %s\n", arg);
+                continue;
+            }
+            bool is_dsd = HAS_EXT(arg, ".dsd");
+            s_disk.fp       = fopen(arg, "r+b");
+            s_disk.is_dsd   = is_dsd;
+            s_disk.read_only = false;
+            if (!s_disk.fp) {
+                s_disk.fp        = fopen(arg, "rb");
+                s_disk.read_only = true;
+            }
+            if (s_disk.fp) {
+                s_disk.n_tracks = disk_detect_tracks(s_disk.fp, is_dsd);
+                printf("[disk] %s (%s, %s, %u tracks)\n", arg,
+                       is_dsd ? "DSD" : "SSD",
+                       s_disk.read_only ? "read-only" : "read-write",
+                       s_disk.n_tracks);
+                bbc_machine_mount_disk(s_machine, 0,
+                                       disk_read, disk_write, disk_seek,
+                                       &s_disk);
+            } else {
+                fprintf(stderr, "[disk] Cannot open %s\n", arg);
+            }
+
         } else {
-            fprintf(stderr, "[disk] Cannot open %s\n", img);
+            fprintf(stderr, "[args] Unknown file type: %s (expected .ssd/.dsd/.uef)\n", arg);
         }
     }
+    #undef HAS_EXT
 
     /* --- SDL init ----------------------------------------------------------- */
     if (SDL_Init(SDL_INIT_VIDEO | SDL_INIT_AUDIO) != 0) {

@@ -6,6 +6,7 @@
  */
 
 #include "bbc_machine.h"
+#include "bbc_tape.h"
 #include <string.h>
 #include <stdio.h>
 
@@ -27,6 +28,12 @@ static void     uv_irq     (void *ctx, bool state);
 /* wd1770 callbacks */
 static void     fdc_irq(void *ctx, bool state);
 static void     fdc_drq(void *ctx, bool state);
+
+/* tape callbacks and IO handlers */
+static void     tape_irq        (void *ctx, bool state);
+static void     sv_motor_changed(void *ctx, bool on);
+static uint8_t  io_acia_read    (uint16_t addr, void *ctx);
+static void     io_acia_write   (uint16_t addr, uint8_t val, void *ctx);
 
 /* wd1770 disk I/O wrappers (forward to m->disk_* callbacks) */
 static int      fdc_read_sector (void *ctx, uint8_t drive, uint8_t track, uint8_t sector, uint8_t side, uint8_t density, uint8_t *buf, uint16_t *len);
@@ -94,6 +101,7 @@ void bbc_machine_init(bbc_machine_t *m,
             .keyboard_read = sv_keyboard_read,
             .latch_changed = sv_latch_changed,
             .irq           = sv_irq,
+            .motor_changed = sv_motor_changed,
             .user_ctx      = m,
         };
         bbc_sysvia_init(&m->sysvia, &cb);
@@ -126,6 +134,10 @@ void bbc_machine_init(bbc_machine_t *m,
         };
         wd1770_init(&m->fdc, &cb);
     }
+
+    /* ----- Tape (ACIA / Serial ULA) --------------------------------- */
+    bbc_tape_init(&m->tape);
+    bbc_tape_set_irq_cb(&m->tape, tape_irq, m);
 
     /* ----- SN76489 PSG --------------------------------------------- */
     sn76489_init(&m->psg, 22050);
@@ -171,6 +183,10 @@ void bbc_machine_init(bbc_machine_t *m,
     /* ROMSEL: &FE30 (write selects sideways ROM slot; read returns current slot) */
     bbc_memory_set_read_callback (m->mem, 0xFE30, io_romsel_read,  m);
     bbc_memory_set_write_callback(m->mem, 0xFE30, io_romsel_write, m);
+
+    /* Serial ULA / ACIA: &FE08–&FE09 (tape interface) */
+    bbc_memory_set_range_callbacks(m->mem, 0xFE08, 2,
+        io_acia_read, io_acia_write, m);
 }
 
 /* ======================================================================
@@ -284,6 +300,7 @@ int bbc_machine_step(bbc_machine_t *m) {
     bbc_sysvia_tick (&m->sysvia,  cycles);
     bbc_uservia_tick(&m->uservia, cycles);
     wd1770_tick     (&m->fdc,     cycles);
+    bbc_tape_tick   (&m->tape,    cycles);
 
     /* Tick CRTC at 1 MHz (= CPU / 2).  bbc_video_tick() generates VSYNC
      * which drives the MOS frame IRQ via System VIA CA1.  Without this the
@@ -647,4 +664,50 @@ static void io_romsel_write(uint16_t addr, uint8_t val, void *ctx) {
     (void)addr;
     bbc_machine_t *m = (bbc_machine_t *)ctx;
     bbc_memory_set_romsel(m->mem, val & 0x0F);
+}
+
+/* ======================================================================
+ * Serial ULA / ACIA — &FE08 (status/control) and &FE09 (data)
+ * ====================================================================== */
+
+static uint8_t io_acia_read(uint16_t addr, void *ctx) {
+    bbc_machine_t *m = (bbc_machine_t *)ctx;
+    return bbc_tape_read(&m->tape, (uint8_t)(addr & 1));
+}
+
+static void io_acia_write(uint16_t addr, uint8_t val, void *ctx) {
+    bbc_machine_t *m = (bbc_machine_t *)ctx;
+    bbc_tape_write(&m->tape, (uint8_t)(addr & 1), val);
+}
+
+/* ======================================================================
+ * Tape IRQ — routes ACIA interrupt to CPU IRQ
+ * ====================================================================== */
+
+static void tape_irq(void *ctx, bool state) {
+    bbc_machine_t *m = (bbc_machine_t *)ctx;
+    /* Tape IRQ shares /IRQ with VIA IRQs */
+    if (state)
+        bbc_cpu_irq(m->cpu);
+}
+
+/* ======================================================================
+ * Tape motor — called from sysvia CB2 output
+ * ====================================================================== */
+
+static void sv_motor_changed(void *ctx, bool on) {
+    bbc_machine_t *m = (bbc_machine_t *)ctx;
+    bbc_tape_set_motor(&m->tape, on);
+}
+
+/* ======================================================================
+ * bbc_machine_mount_tape
+ * ====================================================================== */
+
+int bbc_machine_mount_tape(bbc_machine_t *m, const char *uef_path) {
+    if (!uef_path) {
+        bbc_tape_free(&m->tape);
+        return 0;
+    }
+    return bbc_tape_load_uef(&m->tape, uef_path);
 }

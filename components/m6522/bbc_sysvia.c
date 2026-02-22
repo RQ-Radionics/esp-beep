@@ -198,6 +198,18 @@ static void sysvia_irq(void *user_ctx, bool state)
         sv->cb.irq(sv->cb.user_ctx, state);
 }
 
+static void sysvia_control_out(void *user_ctx, uint8_t line, bool state)
+{
+    bbc_sysvia_t *sv = (bbc_sysvia_t *)user_ctx;
+    if (line == 1) {
+        /* CB2 = tape motor control (active HIGH = motor on) */
+        SV_LOGD("CB2 (motor) %s", state ? "ON" : "OFF");
+        if (sv->cb.motor_changed)
+            sv->cb.motor_changed(sv->cb.user_ctx, state);
+    }
+    /* CA2 (line==0) is handled separately in sysvia_update_ca2 */
+}
+
 /* -------------------------------------------------------------------------
  * Public API
  * ------------------------------------------------------------------------- */
@@ -212,7 +224,7 @@ void bbc_sysvia_init(bbc_sysvia_t *sv, const bbc_sysvia_callbacks_t *callbacks)
         .port_out    = sysvia_port_out,
         .port_in     = sysvia_port_in,
         .irq         = sysvia_irq,
-        .control_out = NULL,
+        .control_out = sysvia_control_out,
         .user_ctx    = sv,
     };
     m6522_init(&sv->via, &via_cb);

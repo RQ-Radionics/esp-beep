@@ -68,6 +68,12 @@ typedef struct {
      */
     void (*irq)(void *user_ctx, bool state);
 
+    /*
+     * Tape motor control via CB2 output.
+     * Called whenever CB2 changes state (true = motor on, false = motor off).
+     */
+    void (*motor_changed)(void *user_ctx, bool on);
+
     void *user_ctx;
 } bbc_sysvia_callbacks_t;
 

@@ -19,6 +19,7 @@ INCS    := -I$(COMP)/bbc_machine/include \
            -I$(COMP)/m6522/include \
            -I$(COMP)/wd1770/include \
            -I$(COMP)/sn76489/include \
+           -I$(COMP)/bbc_tape/include \
            -I$(ROOT)/ext/vrEmu6502/src
 
 SRCS    := main_sdl.c \
@@ -53,6 +54,7 @@ COMP_SRCS := $(COMP)/bbc_machine/bbc_machine.c \
              $(COMP)/m6522/bbc_uservia.c \
              $(COMP)/wd1770/wd1770.c \
              $(COMP)/sn76489/sn76489.c \
+             $(COMP)/bbc_tape/bbc_tape.c \
              $(ROOT)/ext/vrEmu6502/src/vrEmu6502.c
 
 SRCS    := main_sdl.c $(COMP_SRCS)
