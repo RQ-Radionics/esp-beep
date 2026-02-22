@@ -322,7 +322,9 @@ static uint8_t acia_status(const bbc_tape_t *tape)
      *   The MOS uses this at $F5B7/BCC and $F5C0/BCS to distinguish:
      *     carrier bytes (DCD=1) → C=1 after 3xLSR → advances C2 1→2
      *     data bytes    (DCD=0) → C=0 after 3xLSR → C2 2→3 via CMP $2A */
-    if (tape->motor_on && tape->rx_is_carrier) s |= 0x04;
+    /* DCD drops when tape ends — no more carrier after last block */
+    bool tape_has_data = tape->blocks && (tape->cur_block < tape->n_blocks || tape->rx_full);
+    if (tape->motor_on && tape->rx_is_carrier && tape_has_data) s |= 0x04;
     /* IRQ = rx_ie & rx_full */
     if (tape->irq_enabled && tape->rx_full) s |= 0x80;
     return s;
